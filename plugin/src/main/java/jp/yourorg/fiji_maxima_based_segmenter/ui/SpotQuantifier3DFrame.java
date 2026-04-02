@@ -816,18 +816,18 @@ public class SpotQuantifier3DFrame extends PlugInFrame {
                                     conn, fillH);
     }
 
-    /** Volume slider uses linear scale over [volRangeMin, volRangeMax]. */
+    /** Volume slider uses log scale over [volRangeMin, volRangeMax]. */
     private int volToSlider(double vol) {
-        double ratio = (volRangeMax > volRangeMin)
-            ? (vol - volRangeMin) / (volRangeMax - volRangeMin)
-            : 0;
-        ratio = Math.max(0, Math.min(1, ratio));
+        if (volRangeMax <= volRangeMin || volRangeMin <= 0) return 0;
+        vol = Math.max(volRangeMin, Math.min(volRangeMax, vol));
+        double ratio = Math.log(vol / volRangeMin) / Math.log(volRangeMax / volRangeMin);
         return (int) Math.round(ratio * VOL_SLIDER_STEPS);
     }
 
     private double sliderToVol(int pos) {
+        if (volRangeMax <= volRangeMin || volRangeMin <= 0) return volRangeMin;
         double ratio = pos / (double) VOL_SLIDER_STEPS;
-        return volRangeMin + ratio * (volRangeMax - volRangeMin);
+        return volRangeMin * Math.pow(volRangeMax / volRangeMin, ratio);
     }
 
     private Scrollbar makeVolBar(double initVal) {

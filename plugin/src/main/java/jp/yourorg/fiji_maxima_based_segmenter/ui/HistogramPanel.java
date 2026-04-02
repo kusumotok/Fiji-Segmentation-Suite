@@ -16,6 +16,7 @@ public class HistogramPanel extends Panel {
     private int histSlice = -1;
     private int dragMode = 0; // 0 none, 1 bg, 2 fg
     private boolean fgEnabled = true;
+    private boolean logScale = true;
     private static final int PAD = 8;
     private static final int HANDLE_TOL = 4;
 
@@ -76,6 +77,11 @@ public class HistogramPanel extends Panel {
         repaint();
     }
 
+    public void setLogScale(boolean log) {
+        this.logScale = log;
+        repaint();
+    }
+
     @Override
     public void paint(Graphics g) {
         if (imp == null) return;
@@ -91,9 +97,11 @@ public class HistogramPanel extends Panel {
         int plotH = h - 2 * PAD;
         int bins = histogram.length;
         g.setColor(Color.GRAY);
+        double scaleMax = logScale ? Math.log1p(histMax) : histMax;
         for (int i = 0; i < bins; i++) {
             int x = PAD + (int) Math.round(i * (plotW - 1) / (double) (bins - 1));
-            int barH = (int) Math.round(histogram[i] * (plotH - 2) / (double) histMax);
+            double val = logScale ? Math.log1p(histogram[i]) : histogram[i];
+            int barH = scaleMax > 0 ? (int) Math.round(val * (plotH - 2) / scaleMax) : 0;
             g.drawLine(x, PAD + plotH - 1, x, PAD + plotH - 1 - barH);
         }
 
