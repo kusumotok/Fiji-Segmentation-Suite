@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(mvn:*)",
+      "Bash(ls:*)",
+      "mcp__fiji__launch_fiji",
+      "mcp__fiji__run_macro",
+      "mcp__fiji__get_results"
+    ]
+  }
+}
