@@ -51,6 +51,35 @@ public class CsvExporter {
      * @param out     Destination file (e.g. "params.txt")
      * @throws IOException on write error
      */
+    /**
+     * Write seeded-watershed parameters to a .env-style text file.
+     *
+     * @param areaThreshold  Low threshold defining the spot domain
+     * @param seedThreshold  High threshold for seed detection
+     * @param params         Quantifier params (size filter, gauss, connectivity, fillHoles)
+     * @param out            Destination file
+     */
+    public static void writeSeededParams(int areaThreshold, int seedThreshold,
+                                          QuantifierParams params, File out) throws IOException {
+        String timestamp = LocalDateTime.now()
+            .format(DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss"));
+
+        try (PrintWriter pw = new PrintWriter(new BufferedWriter(
+                new OutputStreamWriter(new FileOutputStream(out), StandardCharsets.UTF_8)))) {
+            pw.println("# Seeded Spot Quantifier 3D -- session params");
+            pw.println("# TIMESTAMP=" + timestamp);
+            pw.println("AREA_THRESHOLD=" + areaThreshold);
+            pw.println("SEED_THRESHOLD=" + seedThreshold);
+            pw.println("MIN_VOL_UM3=" + (params.minVolUm3 != null ? params.minVolUm3 : ""));
+            pw.println("MAX_VOL_UM3=" + (params.maxVolUm3 != null ? params.maxVolUm3 : ""));
+            pw.println("GAUSSIAN_BLUR=" + params.gaussianBlur);
+            pw.println("GAUSS_XY=" + (params.gaussianBlur ? params.gaussXY : ""));
+            pw.println("GAUSS_Z="  + (params.gaussianBlur ? params.gaussZ  : ""));
+            pw.println("CONNECTIVITY=" + params.connectivity);
+            pw.println("FILL_HOLES="   + params.fillHoles);
+        }
+    }
+
     public static void writeParams(QuantifierParams params, File out) throws IOException {
         String timestamp = LocalDateTime.now()
             .format(DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss"));

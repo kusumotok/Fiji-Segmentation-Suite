@@ -1,6 +1,7 @@
 package jp.yourorg.fiji_maxima_based_segmenter.ui;
 
 import ij.ImagePlus;
+import ij.process.ImageProcessor;
 import jp.yourorg.fiji_maxima_based_segmenter.core.ThresholdModel;
 
 import java.awt.*;
@@ -13,7 +14,10 @@ public class HistogramPanel extends Panel {
     private final ThresholdListener listener;
     private int[] histogram;
     private int histMax = 1;
-    private int histSlice = -1;
+    private int histSlice = -2; // -2 = "not computed yet"
+    // Actual data range, computed from raw pixels (B&C-independent)
+    private int histRangeMin = 0;
+    private int histRangeMax = 65535;
     private int dragMode = 0; // 0 none, 1 bg, 2 fg
     private boolean fgEnabled = true;
     private boolean logScale = true;
@@ -68,7 +72,8 @@ public class HistogramPanel extends Panel {
 
     public void setImage(ImagePlus imp) {
         this.imp = imp;
-        this.histSlice = -1;
+        this.histogram = null; // force recompute for new image
+        this.histSlice = -2;
         repaint();
     }
 
@@ -120,66 +125,90 @@ public class HistogramPanel extends Panel {
 
     private void ensureHistogram() {
         if (imp == null) return;
-        // For 3D stacks, compute histogram once for entire stack (not per-slice)
         boolean is3D = imp.getNSlices() > 1;
-        int slice = is3D ? -1 : imp.getCurrentSlice(); // -1 means "all slices"
+        // For 3D: use sentinel -1 (recompute only when histogram is null or image changed).
+        // For 2D: use current slice number (recompute on slice change).
+        int slice = is3D ? -1 : imp.getCurrentSlice();
         if (histogram != null && histSlice == slice) return;
-        histogram = computeHistogram(imp, model.getMinValue(), model.getMaxValue(), is3D);
-        histMax = 1;
-        for (int v : histogram) if (v > histMax) histMax = v;
+        buildHistogram(imp, is3D);
         histSlice = slice;
     }
 
-    private int[] computeHistogram(ImagePlus imp, int minValue, int maxValue, boolean allSlices) {
-        int bins = 256;
-        int[] hist = new int[bins];
-        if (maxValue <= minValue) return hist;
-        int w = imp.getWidth();
-        int h = imp.getHeight();
-        
-        if (allSlices && imp.getNSlices() > 1) {
-            // Compute histogram for entire 3D stack
+    /**
+     * Build histogram from raw pixel values in a single pass.
+     * The data range (histRangeMin/Max) is derived from actual pixels,
+     * completely independent of Brightness & Contrast display settings.
+     */
+    private void buildHistogram(ImagePlus imp, boolean allSlices) {
+        int iw = imp.getWidth();
+        int ih = imp.getHeight();
+        int bitDepth = imp.getBitDepth();
+        // Use full-resolution bins matching the bit depth for a single-pass approach.
+        int fullBins = (bitDepth >= 16) ? 65536 : 256;
+        int[] fullHist = new int[fullBins];
+
+        if (allSlices) {
             int nSlices = imp.getNSlices();
             for (int z = 1; z <= nSlices; z++) {
                 imp.setSliceWithoutUpdate(z);
-                for (int y = 0; y < h; y++) {
-                    for (int x = 0; x < w; x++) {
-                        double v = imp.getProcessor().getPixelValue(x, y);
-                        int bin = (int) Math.round((v - minValue) / (maxValue - minValue) * (bins - 1));
-                        if (bin < 0) bin = 0;
-                        if (bin >= bins) bin = bins - 1;
-                        hist[bin]++;
+                ImageProcessor ip = imp.getProcessor();
+                for (int y = 0; y < ih; y++) {
+                    for (int x = 0; x < iw; x++) {
+                        int v = (int) ip.getPixelValue(x, y);
+                        if (v >= 0 && v < fullBins) fullHist[v]++;
+                        else if (v >= fullBins) fullHist[fullBins - 1]++;
                     }
                 }
             }
         } else {
-            // Compute histogram for current slice only (2D)
-            for (int y = 0; y < h; y++) {
-                for (int x = 0; x < w; x++) {
-                    double v = imp.getProcessor().getPixelValue(x, y);
-                    int bin = (int) Math.round((v - minValue) / (maxValue - minValue) * (bins - 1));
-                    if (bin < 0) bin = 0;
-                    if (bin >= bins) bin = bins - 1;
-                    hist[bin]++;
+            ImageProcessor ip = imp.getProcessor();
+            for (int y = 0; y < ih; y++) {
+                for (int x = 0; x < iw; x++) {
+                    int v = (int) ip.getPixelValue(x, y);
+                    if (v >= 0 && v < fullBins) fullHist[v]++;
+                    else if (v >= fullBins) fullHist[fullBins - 1]++;
                 }
             }
         }
-        return hist;
+
+        // Find actual data range from the histogram (avoids empty leading/trailing bins)
+        int dataMin = 0, dataMax = fullBins - 1;
+        for (int i = 0; i < fullBins; i++) { if (fullHist[i] > 0) { dataMin = i; break; } }
+        for (int i = fullBins - 1; i >= 0; i--) { if (fullHist[i] > 0) { dataMax = i; break; } }
+        histRangeMin = dataMin;
+        histRangeMax = (dataMax > dataMin) ? dataMax : dataMin + 1;
+
+        // Downsample to 256 display bins over the actual data range
+        int bins = 256;
+        int[] hist = new int[bins];
+        int range = histRangeMax - histRangeMin;
+        for (int i = histRangeMin; i <= histRangeMax && i < fullBins; i++) {
+            if (fullHist[i] == 0) continue;
+            int bin = (range > 0) ? (int) Math.round((double)(i - histRangeMin) / range * (bins - 1)) : 0;
+            if (bin < 0) bin = 0;
+            if (bin >= bins) bin = bins - 1;
+            hist[bin] += fullHist[i];
+        }
+
+        histogram = hist;
+        histMax = 1;
+        for (int v : histogram) if (v > histMax) histMax = v;
     }
 
     private int valueToX(int value) {
         int w = getWidth() - 2 * PAD;
-        int min = model.getMinValue();
-        int max = model.getMaxValue();
+        int min = histRangeMin;
+        int max = histRangeMax;
         if (max <= min) return PAD;
         double t = (value - min) / (double) (max - min);
+        t = Math.max(0.0, Math.min(1.0, t));
         return PAD + (int) Math.round(t * (w - 1));
     }
 
     private int xToValue(int x) {
         int w = getWidth() - 2 * PAD;
-        int min = model.getMinValue();
-        int max = model.getMaxValue();
+        int min = histRangeMin;
+        int max = histRangeMax;
         int clamped = Math.max(PAD, Math.min(PAD + w - 1, x));
         double t = (clamped - PAD) / (double) (w - 1);
         if (max <= min) return min;

@@ -136,15 +136,8 @@ public class ThresholdModel {
     }
 
     private void clamp() {
-        int min = getMinValue();
-        int max = getMaxValue();
-        if (max < min) {
-            int tmp = max;
-            max = min;
-            min = tmp;
-        }
-        tFg = Math.max(min, Math.min(max, tFg));
-        tBg = Math.max(min, Math.min(max, tBg));
+        // Allow thresholds to be outside image range - no clamping needed
+        // This allows users to set thresholds independently of image content
     }
 
     public void resetDefaults() {

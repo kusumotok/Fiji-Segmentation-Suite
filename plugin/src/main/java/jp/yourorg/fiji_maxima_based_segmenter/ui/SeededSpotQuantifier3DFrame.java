@@ -34,31 +34,37 @@ import java.util.concurrent.atomic.AtomicInteger;
 import javax.swing.SwingWorker;
 
 /**
- * GUI frame for Spot_Quantifier_3D_.
+ * GUI frame for Seeded_Spot_Quantifier_3D_.
  *
  * Layout:
- *   [Histogram (full 3D stack)]
- *   Threshold:  [slider] [field]
- *   [✓] Min vol µm³: [slider] [field]
+ *   [Histogram (full 3D stack, two threshold lines)]
+ *   Area threshold:  [slider] [field]    ← low threshold (spot extent / domain)
+ *   Seed threshold:  [slider] [field]    ← high threshold (seed detection)
+ *   [✓] Min vol µm³: [slider] [field]   ← seed size filter
  *   [✓] Max vol µm³: [slider] [field]
  *   [□] Gaussian blur  XY:[field] Z:[field]
- *   Preview: ○ Off  ● Overlay
- *   [Apply]  [Add ROI]  [Save ROI]  [Save CSV & Params]
- *
- * Preview is color-coded:
- *   yellow (50% opacity) = valid spot
- *   red                  = too small (< min vol)
- *   blue                 = too large (> max vol)
+ *   Connectivity: [6▼]  [□] Fill holes
+ *   Preview: ○ Off  ● Overlay  ○ ROI
+ *   [Apply]  ROI color: [▼]  [Add ROI]  [Save ROI]  [Save CSV]  [Save All]  [Batch…]
  */
-public class SpotQuantifier3DFrame extends PlugInFrame {
+public class SeededSpotQuantifier3DFrame extends PlugInFrame {
 
-    // --- Colors for preview overlay (ARGB) ---
-    private static final int COLOR_VALID     = 0x80FFFF00; // yellow, 50% alpha
-    private static final int COLOR_TOO_SMALL = 0x80FF4444; // red,    50% alpha
-    private static final int COLOR_TOO_LARGE = 0x804444FF; // blue,   50% alpha
+    // --- Preview overlay colors ---
+    // (filled overlay colors are derived dynamically from seedColorChoice / roiColorChoice)
+
+    /** Selectable colors for the ROI preview outline. */
+    static final String[][] PREVIEW_COLOR_OPTIONS = {
+        { "Yellow",  "#FFFF00" },
+        { "Purple",  "#AA00FF" },
+        { "Cyan",    "#00FFFF" },
+        { "Magenta", "#FF00FF" },
+        { "Red",     "#FF0000" },
+        { "Green",   "#00FF00" },
+        { "White",   "#FFFFFF" },
+    };
 
     private final ImagePlus imp;
-    private final ThresholdModel model; // used only for histogram panel / tBg
+    private final ThresholdModel model;
 
     // Calibration (µm per pixel)
     private final double vw, vh, vd, voxelVol;
@@ -66,8 +72,12 @@ public class SpotQuantifier3DFrame extends PlugInFrame {
     // --- UI components ---
     private final HistogramPanel histogramPanel;
 
-    private final Scrollbar threshBar;
-    private final TextField threshField;
+    private final Checkbox  areaEnabledCheck;
+    private final Scrollbar areaThreshBar;
+    private final TextField areaThreshField;
+
+    private final Scrollbar seedThreshBar;
+    private final TextField seedThreshField;
 
     private final Checkbox  minVolCheck;
     private final Scrollbar minVolBar;
@@ -89,14 +99,16 @@ public class SpotQuantifier3DFrame extends PlugInFrame {
     private final Checkbox previewOverlay;
     private final Checkbox previewRoi;
 
-    private final Button applyBtn      = new Button("Apply");
-    private final Button addRoiBtn     = new Button("Add ROI");
-    private final Button saveRoiBtn    = new Button("Save ROI");
-    private final Button saveCsvBtn    = new Button("Save CSV");
-    private final Button saveAllBtn    = new Button("Save All");
-    private final Button batchBtn      = new Button("Batch…");
+    private final Button applyBtn   = new Button("Apply");
+    private final Button addRoiBtn  = new Button("Add ROI");
+    private final Button saveRoiBtn = new Button("Save ROI");
+    private final Button saveCsvBtn = new Button("Save CSV");
+    private final Button saveAllBtn = new Button("Save All");
+    private final Button batchBtn   = new Button("Batch…");
 
-    private final Choice roiColorChoice;   // ROI stroke color selector
+    private final Choice    seedColorChoice;
+    private final Choice    roiColorChoice;
+    private final TextField overlayOpacityField;
 
     private final Choice zprojChoice;
     private final Button zprojRefreshBtn = new Button("Reload");
@@ -106,32 +118,37 @@ public class SpotQuantifier3DFrame extends PlugInFrame {
     // --- State ---
     private boolean syncing = false;
 
-    // Current parameter values (read from UI)
-    private int    threshold;
+    private boolean areaEnabled;
+    private int     areaThreshold;
+    private int     seedThreshold;
     private boolean minVolEnabled, maxVolEnabled;
     private double  minVolVal, maxVolVal;
     private boolean gaussEnabled;
     private double  gaussXYVal, gaussZVal;
 
-    // --- Cache ---
-    // CC cache: keyed on "threshold:gaussEnabled:gaussXY:gaussZ"
-    private CcResult3D cachedCc;
-    private String     ccCacheKey;
+    // --- Segmentation cache ---
+    private SeededQuantifier3D.SeededResult cachedSeededResult;
+    private String                          segCacheKey;
 
-    // Last slider ranges for vol (set after first CC run)
+    // --- Z-proj render cache (invalidated with segmentation cache) ---
+    private int[]      cachedZProjTypeMap;   // 0=bg, 1=seed, 2=area  (Overlay mode)
+    private List<Roi>  cachedZProjSeedRois;  // union outlines for seed labels (ROI mode)
+    private List<Roi>  cachedZProjAreaRois;  // union outlines for area labels (ROI mode)
+
+    // Vol slider ranges
     private double volRangeMin = 0.01;
     private double volRangeMax = 100.0;
     private static final int VOL_SLIDER_STEPS = 1000;
 
     // --- Preview / Z-watch timers ---
-    private final Timer previewTimer = new Timer("sq3d-preview", true);
+    private final Timer previewTimer = new Timer("ssq3d-preview", true);
     private TimerTask   previewTask;
     private final AtomicInteger previewGen = new AtomicInteger();
-    private final Timer zWatchTimer = new Timer("sq3d-zwatch", true);
+    private final Timer zWatchTimer = new Timer("ssq3d-zwatch", true);
     private int lastZ = -1;
 
-    public SpotQuantifier3DFrame(ImagePlus imp) {
-        super("Spot Quantifier 3D");
+    public SeededSpotQuantifier3DFrame(ImagePlus imp) {
+        super("Seeded Spot Quantifier 3D");
         this.imp = imp;
 
         Calibration cal = imp.getCalibration();
@@ -140,20 +157,25 @@ public class SpotQuantifier3DFrame extends PlugInFrame {
         vd       = cal.pixelDepth  > 0 ? cal.pixelDepth  : 1;
         voxelVol = vw * vh * vd;
 
-        // ThresholdModel only used to drive HistogramPanel
         model = ThresholdModel.createFor3DPlugin(imp);
-
-        // Set initial threshold to 20% of max
-        threshold = model.getTBg();
-        model.setTBg(threshold);
 
         int imgMin = model.getMinValue();
         int imgMax = model.getMaxValue();
         if (imgMax <= imgMin) imgMax = imgMin + 1;
 
-        // Build UI components
-        threshBar   = new Scrollbar(Scrollbar.HORIZONTAL, threshold, 1, imgMin, imgMax + 1);
-        threshField = new TextField(Integer.toString(threshold), 6);
+        // Initial thresholds: area = 20% of max, seed = 40% of max
+        areaEnabled   = true;
+        areaThreshold = model.getTBg();           // ThresholdModel default (20% of max)
+        seedThreshold = Math.min(imgMax, areaThreshold * 2);
+        model.setTBg(areaThreshold);
+        model.setTFg(seedThreshold);
+
+        areaEnabledCheck = new Checkbox("", areaEnabled);
+        areaThreshBar    = new Scrollbar(Scrollbar.HORIZONTAL, areaThreshold, 1, imgMin, imgMax + 1);
+        areaThreshField  = new TextField(Integer.toString(areaThreshold), 6);
+
+        seedThreshBar   = new Scrollbar(Scrollbar.HORIZONTAL, seedThreshold, 1, imgMin, imgMax + 1);
+        seedThreshField = new TextField(Integer.toString(seedThreshold), 6);
 
         minVolEnabled = true;
         maxVolEnabled = false;
@@ -186,21 +208,25 @@ public class SpotQuantifier3DFrame extends PlugInFrame {
         connectivityChoice.select("6");
         fillHolesCheck = new Checkbox("Fill holes", false);
 
-        roiColorChoice = new Choice();
-        for (String[] entry : RoiExporter3D.ROI_COLOR_OPTIONS) {
-            roiColorChoice.add(entry[0]); // display name
-        }
-        roiColorChoice.select(0); // default: Yellow
-
         previewOff     = new Checkbox("Off",     previewGroup, true);
         previewOverlay = new Checkbox("Overlay", previewGroup, false);
         previewRoi     = new Checkbox("ROI",     previewGroup, false);
 
+        seedColorChoice = new Choice();
+        for (String[] entry : PREVIEW_COLOR_OPTIONS) seedColorChoice.add(entry[0]);
+        seedColorChoice.select(1); // Purple
+
+        roiColorChoice = new Choice();
+        for (String[] entry : PREVIEW_COLOR_OPTIONS) roiColorChoice.add(entry[0]);
+        roiColorChoice.select(0); // Yellow
+
+        overlayOpacityField = new TextField("50", 3);
+
         zprojChoice = new Choice();
         refreshZProjChoiceItems();
 
-        histogramPanel = new HistogramPanel(imp, model, this::onHistogramThreshold);
-        histogramPanel.setFgEnabled(false);
+        histogramPanel = new HistogramPanel(imp, model, this::onHistogramThresholds);
+        histogramPanel.setFgEnabled(true); // show both area and seed threshold lines
 
         buildLayout();
         wireEvents();
@@ -216,28 +242,25 @@ public class SpotQuantifier3DFrame extends PlugInFrame {
     private void buildLayout() {
         setLayout(new BorderLayout(4, 4));
 
-        // Histogram at top
         Panel top = new Panel(new BorderLayout());
         top.add(histogramPanel, BorderLayout.CENTER);
         add(top, BorderLayout.NORTH);
 
-        // Parameter rows in center
         Panel center = new Panel(new GridLayout(0, 1, 2, 2));
-        center.add(makeThreshRow());
-        center.add(makeVolRow("Min vol µm³:", minVolCheck, minVolBar, minVolField));
-        center.add(makeVolRow("Max vol µm³:", maxVolCheck, maxVolBar, maxVolField));
+        center.add(makeAreaThreshRow());
+        center.add(makeThreshRow("Seed threshold:", seedThreshBar, seedThreshField));
+        center.add(makeVolRow("Min vol µm³ (seed):", minVolCheck, minVolBar, minVolField));
+        center.add(makeVolRow("Max vol µm³ (seed):", maxVolCheck, maxVolBar, maxVolField));
         center.add(makeGaussRow());
         center.add(makeConnectivityRow());
         center.add(makePreviewRow());
+        center.add(makeColorsRow());
         center.add(makeZProjRow());
         center.add(makeStatusRow());
         add(center, BorderLayout.CENTER);
 
-        // Buttons at bottom
         Panel buttons = new Panel(new FlowLayout(FlowLayout.RIGHT, 4, 4));
         buttons.add(applyBtn);
-        buttons.add(new Label("ROI color:"));
-        buttons.add(roiColorChoice);
         buttons.add(addRoiBtn);
         buttons.add(saveRoiBtn);
         buttons.add(saveCsvBtn);
@@ -246,15 +269,28 @@ public class SpotQuantifier3DFrame extends PlugInFrame {
         add(buttons, BorderLayout.SOUTH);
     }
 
-    private Panel makeThreshRow() {
+    private Panel makeAreaThreshRow() {
         Panel p = new Panel(new GridBagLayout());
         GridBagConstraints c = baseGbc();
-        c.gridx = 0; p.add(new Label("Threshold:"), c);
+        c.gridx = 0; p.add(areaEnabledCheck, c);
+        c.gridx = 1; p.add(new Label("Area threshold:"), c);
+        c.gridx = 2; c.weightx = 1; c.fill = GridBagConstraints.HORIZONTAL;
+        areaThreshBar.setPreferredSize(new Dimension(220, 18));
+        p.add(areaThreshBar, c);
+        c.gridx = 3; c.weightx = 0; c.fill = GridBagConstraints.NONE;
+        p.add(areaThreshField, c);
+        return p;
+    }
+
+    private Panel makeThreshRow(String label, Scrollbar bar, TextField field) {
+        Panel p = new Panel(new GridBagLayout());
+        GridBagConstraints c = baseGbc();
+        c.gridx = 0; p.add(new Label(label), c);
         c.gridx = 1; c.weightx = 1; c.fill = GridBagConstraints.HORIZONTAL;
-        threshBar.setPreferredSize(new Dimension(240, 18));
-        p.add(threshBar, c);
+        bar.setPreferredSize(new Dimension(240, 18));
+        p.add(bar, c);
         c.gridx = 2; c.weightx = 0; c.fill = GridBagConstraints.NONE;
-        p.add(threshField, c);
+        p.add(field, c);
         return p;
     }
 
@@ -304,6 +340,18 @@ public class SpotQuantifier3DFrame extends PlugInFrame {
         return p;
     }
 
+    private Panel makeColorsRow() {
+        Panel p = new Panel(new FlowLayout(FlowLayout.LEFT, 4, 2));
+        p.add(new Label("Colors:"));
+        p.add(new Label("Seed:"));
+        p.add(seedColorChoice);
+        p.add(new Label("Area/ROI:"));
+        p.add(roiColorChoice);
+        p.add(new Label("Opacity %:"));
+        p.add(overlayOpacityField);
+        return p;
+    }
+
     private Panel makePreviewRow() {
         Panel p = new Panel(new FlowLayout(FlowLayout.LEFT, 4, 2));
         p.add(new Label("Preview:"));
@@ -326,29 +374,54 @@ public class SpotQuantifier3DFrame extends PlugInFrame {
     // =========================================================
 
     private void wireEvents() {
-        // Threshold slider + field
-        threshBar.addAdjustmentListener(e -> {
+        // Area enabled checkbox
+        areaEnabledCheck.addItemListener(e -> {
             if (syncing) return;
-            threshold = threshBar.getValue();
-            model.setTBg(threshold);
-            syncing = true;
-            threshField.setText(Integer.toString(threshold));
-            histogramPanel.repaint();
-            syncing = false;
-            onThreshOrGaussChanged();
-        });
-        threshField.addActionListener(e -> commitThreshField());
-        threshField.addFocusListener(new FocusAdapter() {
-            @Override public void focusLost(FocusEvent e) { commitThreshField(); }
+            areaEnabled = areaEnabledCheck.getState();
+            areaThreshBar.setEnabled(areaEnabled);
+            areaThreshField.setEnabled(areaEnabled);
+            onParamsChanged();
         });
 
-        // Min vol checkbox
+        // Area threshold
+        areaThreshBar.addAdjustmentListener(e -> {
+            if (syncing) return;
+            areaThreshold = areaThreshBar.getValue();
+            model.setTBg(areaThreshold);
+            syncing = true;
+            areaThreshField.setText(Integer.toString(areaThreshold));
+            histogramPanel.repaint();
+            syncing = false;
+            onParamsChanged();
+        });
+        areaThreshField.addActionListener(e -> commitAreaThreshField());
+        areaThreshField.addFocusListener(new FocusAdapter() {
+            @Override public void focusLost(FocusEvent e) { commitAreaThreshField(); }
+        });
+
+        // Seed threshold
+        seedThreshBar.addAdjustmentListener(e -> {
+            if (syncing) return;
+            seedThreshold = seedThreshBar.getValue();
+            model.setTFg(seedThreshold);
+            syncing = true;
+            seedThreshField.setText(Integer.toString(seedThreshold));
+            histogramPanel.repaint();
+            syncing = false;
+            onParamsChanged();
+        });
+        seedThreshField.addActionListener(e -> commitSeedThreshField());
+        seedThreshField.addFocusListener(new FocusAdapter() {
+            @Override public void focusLost(FocusEvent e) { commitSeedThreshField(); }
+        });
+
+        // Min vol
         minVolCheck.addItemListener(e -> {
             if (syncing) return;
             minVolEnabled = minVolCheck.getState();
             minVolBar.setEnabled(minVolEnabled);
             minVolField.setEnabled(minVolEnabled);
-            onSizeFilterChanged();
+            onParamsChanged();
         });
         minVolBar.addAdjustmentListener(e -> {
             if (syncing) return;
@@ -356,20 +429,20 @@ public class SpotQuantifier3DFrame extends PlugInFrame {
             syncing = true;
             minVolField.setText(formatVol(minVolVal));
             syncing = false;
-            onSizeFilterChanged();
+            onParamsChanged();
         });
         minVolField.addActionListener(e -> commitMinVolField());
         minVolField.addFocusListener(new FocusAdapter() {
             @Override public void focusLost(FocusEvent e) { commitMinVolField(); }
         });
 
-        // Max vol checkbox
+        // Max vol
         maxVolCheck.addItemListener(e -> {
             if (syncing) return;
             maxVolEnabled = maxVolCheck.getState();
             maxVolBar.setEnabled(maxVolEnabled);
             maxVolField.setEnabled(maxVolEnabled);
-            onSizeFilterChanged();
+            onParamsChanged();
         });
         maxVolBar.addAdjustmentListener(e -> {
             if (syncing) return;
@@ -377,7 +450,7 @@ public class SpotQuantifier3DFrame extends PlugInFrame {
             syncing = true;
             maxVolField.setText(formatVol(maxVolVal));
             syncing = false;
-            onSizeFilterChanged();
+            onParamsChanged();
         });
         maxVolField.addActionListener(e -> commitMaxVolField());
         maxVolField.addFocusListener(new FocusAdapter() {
@@ -390,7 +463,7 @@ public class SpotQuantifier3DFrame extends PlugInFrame {
             gaussEnabled = gaussCheck.getState();
             gaussXYField.setEnabled(gaussEnabled);
             gaussZField .setEnabled(gaussEnabled);
-            onThreshOrGaussChanged();
+            onParamsChanged();
         });
         gaussXYField.addActionListener(e -> commitGaussXYField());
         gaussXYField.addFocusListener(new FocusAdapter() {
@@ -402,20 +475,25 @@ public class SpotQuantifier3DFrame extends PlugInFrame {
         });
 
         // Connectivity / fill holes
-        connectivityChoice.addItemListener(e -> onThreshOrGaussChanged());
-        fillHolesCheck.addItemListener(e -> onThreshOrGaussChanged());
+        connectivityChoice.addItemListener(e -> onParamsChanged());
+        fillHolesCheck.addItemListener(e -> onParamsChanged());
 
-        // Preview radio
-        ItemListener previewListener = e -> {
-            if (syncing) return;
-            onPreviewModeChanged();
-        };
+        // Preview
+        ItemListener previewListener = e -> onPreviewModeChanged();
         previewOff    .addItemListener(previewListener);
         previewOverlay.addItemListener(previewListener);
         previewRoi    .addItemListener(previewListener);
 
+        // Color choices and opacity — re-render overlay only, no re-segmentation
+        seedColorChoice.addItemListener(e -> onColorChanged());
+        roiColorChoice .addItemListener(e -> onColorChanged());
+        overlayOpacityField.addActionListener(e -> onColorChanged());
+        overlayOpacityField.addFocusListener(new FocusAdapter() {
+            @Override public void focusLost(FocusEvent e) { onColorChanged(); }
+        });
+
         // Z-proj window selection
-        zprojChoice    .addItemListener(e -> onZProjChanged());
+        zprojChoice    .addItemListener(e -> onColorChanged());
         zprojRefreshBtn.addActionListener(e -> refreshZProjChoiceItems());
 
         // Buttons
@@ -437,18 +515,34 @@ public class SpotQuantifier3DFrame extends PlugInFrame {
     }
 
     // =========================================================
+    // Histogram callback
+    // =========================================================
+
+    private void onHistogramThresholds(int tBg, int tFg) {
+        if (syncing) return;
+        areaThreshold = tBg;
+        seedThreshold = tFg;
+        model.setTBg(areaThreshold);
+        model.setTFg(seedThreshold);
+        syncing = true;
+        areaThreshBar.setValue(areaThreshold);
+        areaThreshField.setText(Integer.toString(areaThreshold));
+        seedThreshBar.setValue(seedThreshold);
+        seedThreshField.setText(Integer.toString(seedThreshold));
+        syncing = false;
+        onParamsChanged();
+    }
+
+    // =========================================================
     // State changes
     // =========================================================
 
-    /** Called when threshold or gauss settings change → invalidate CC cache, mark modified. */
-    private void onThreshOrGaussChanged() {
-        cachedCc    = null;
-        ccCacheKey  = null;
-        setModified();
-    }
-
-    /** Called when only the size filter changes → invalidate display, mark modified. */
-    private void onSizeFilterChanged() {
+    private void onParamsChanged() {
+        cachedSeededResult  = null;
+        segCacheKey         = null;
+        cachedZProjTypeMap  = null;
+        cachedZProjSeedRois = null;
+        cachedZProjAreaRois = null;
         setModified();
     }
 
@@ -460,7 +554,7 @@ public class SpotQuantifier3DFrame extends PlugInFrame {
             IJ.showStatus("");
         } else {
             // Restore overlay from cache if available; otherwise prompt user to press Apply
-            if (cachedCc != null) {
+            if (cachedSeededResult != null) {
                 updatePreviewForZChange();
             } else {
                 setModified();
@@ -474,33 +568,47 @@ public class SpotQuantifier3DFrame extends PlugInFrame {
         IJ.showStatus("");
     }
 
-    private void onHistogramThreshold(int tBg, int tFg) {
-        if (syncing) return;
-        threshold = tBg;
-        model.setTBg(threshold);
-        syncing = true;
-        threshBar.setValue(threshold);
-        threshField.setText(Integer.toString(threshold));
-        syncing = false;
-        onThreshOrGaussChanged();
+    /** Color choice changed — re-render current overlay without re-segmenting. */
+    private void onColorChanged() {
+        if (previewOff.getState() || cachedSeededResult == null) return;
+        int zPlane = imp.getCurrentSlice();
+        if (previewRoi.getState())
+            renderRoiOverlay(cachedSeededResult.seedSeg, cachedSeededResult.finalSeg,
+                             areaEnabled, zPlane);
+        else
+            renderOverlay(cachedSeededResult.seedSeg, cachedSeededResult.finalSeg, areaEnabled, zPlane);
     }
 
     // =========================================================
     // Commit helpers
     // =========================================================
 
-    private void commitThreshField() {
+    private void commitAreaThreshField() {
         if (syncing) return;
-        int v = parseIntOr(threshField.getText(), threshold);
+        int v = parseIntOr(areaThreshField.getText(), areaThreshold);
         v = Math.max(0, v);
-        threshold = v;
-        model.setTBg(threshold);
+        areaThreshold = v;
+        model.setTBg(areaThreshold);
         syncing = true;
-        threshBar.setValue(threshold);
-        threshField.setText(Integer.toString(threshold));
+        areaThreshBar.setValue(areaThreshold);
+        areaThreshField.setText(Integer.toString(areaThreshold));
         histogramPanel.repaint();
         syncing = false;
-        onThreshOrGaussChanged();
+        onParamsChanged();
+    }
+
+    private void commitSeedThreshField() {
+        if (syncing) return;
+        int v = parseIntOr(seedThreshField.getText(), seedThreshold);
+        v = Math.max(0, v);
+        seedThreshold = v;
+        model.setTFg(seedThreshold);
+        syncing = true;
+        seedThreshBar.setValue(seedThreshold);
+        seedThreshField.setText(Integer.toString(seedThreshold));
+        histogramPanel.repaint();
+        syncing = false;
+        onParamsChanged();
     }
 
     private void commitMinVolField() {
@@ -512,7 +620,7 @@ public class SpotQuantifier3DFrame extends PlugInFrame {
         minVolField.setText(formatVol(minVolVal));
         minVolBar.setValue(volToSlider(minVolVal));
         syncing = false;
-        onSizeFilterChanged();
+        onParamsChanged();
     }
 
     private void commitMaxVolField() {
@@ -524,7 +632,7 @@ public class SpotQuantifier3DFrame extends PlugInFrame {
         maxVolField.setText(formatVol(maxVolVal));
         maxVolBar.setValue(volToSlider(maxVolVal));
         syncing = false;
-        onSizeFilterChanged();
+        onParamsChanged();
     }
 
     private void commitGaussXYField() {
@@ -533,7 +641,7 @@ public class SpotQuantifier3DFrame extends PlugInFrame {
         syncing = true;
         gaussXYField.setText(Double.toString(gaussXYVal));
         syncing = false;
-        if (gaussEnabled) onThreshOrGaussChanged();
+        if (gaussEnabled) onParamsChanged();
     }
 
     private void commitGaussZField() {
@@ -542,7 +650,7 @@ public class SpotQuantifier3DFrame extends PlugInFrame {
         syncing = true;
         gaussZField.setText(Double.toString(gaussZVal));
         syncing = false;
-        if (gaussEnabled) onThreshOrGaussChanged();
+        if (gaussEnabled) onParamsChanged();
     }
 
     // =========================================================
@@ -552,15 +660,13 @@ public class SpotQuantifier3DFrame extends PlugInFrame {
     // schedulePreview() removed — computation is now triggered only by runApply().
 
     private void updatePreviewForZChange() {
-        if (previewOff.getState() || cachedCc == null) return;
+        if (previewOff.getState() || cachedSeededResult == null) return;
         int zPlane = imp.getCurrentSlice();
-        QuantifierParams params = buildParams();
-        Map<Integer, Integer> status = cachedCc.classifyLabels(params, voxelVol);
-        if (previewRoi.getState()) {
-            renderRoiOverlay(cachedCc.buildFilteredResult(status), zPlane);
-        } else {
-            renderOverlay(cachedCc, status, zPlane);
-        }
+        if (previewRoi.getState())
+            renderRoiOverlay(cachedSeededResult.seedSeg, cachedSeededResult.finalSeg,
+                             areaEnabled, zPlane);
+        else
+            renderOverlay(cachedSeededResult.seedSeg, cachedSeededResult.finalSeg, areaEnabled, zPlane);
     }
 
     private void cancelPreview() {
@@ -576,60 +682,113 @@ public class SpotQuantifier3DFrame extends PlugInFrame {
     }
 
     /**
-     * Render color-coded overlay on the current Z-plane:
-     *   yellow = valid, red = too small, blue = too large.
+     * Overlay preview: seed pixels filled with seed color, area-only pixels filled with area color.
+     * When areaEnabled=false, seedSeg==finalSeg so everything is colored with seed color.
      */
-    private void renderOverlay(CcResult3D cc, Map<Integer, Integer> statusMap, int zPlane) {
-        if (cc == null || cc.labelImage == null) return;
-        if (zPlane < 1 || zPlane > cc.labelImage.getNSlices()) return;
+    private void renderOverlay(SegmentationResult3D seedSeg, SegmentationResult3D finalSeg,
+                                boolean areaEn, int zPlane) {
+        if (finalSeg == null || finalSeg.labelImage == null) return;
+        int nSlices = finalSeg.labelImage.getNSlices();
+        if (zPlane < 1 || zPlane > nSlices) return;
 
-        ImageProcessor labelIp = cc.labelImage.getStack().getProcessor(zPlane);
-        int w = labelIp.getWidth();
-        int h = labelIp.getHeight();
+        ImageProcessor finalIp = finalSeg.labelImage.getStack().getProcessor(zPlane);
+        int w = finalIp.getWidth(), h = finalIp.getHeight();
+
+        ImageProcessor seedIp = (areaEn && seedSeg != null && seedSeg.labelImage != null
+                                  && zPlane <= seedSeg.labelImage.getNSlices())
+                                ? seedSeg.labelImage.getStack().getProcessor(zPlane)
+                                : null;
+
+        int seedRgb = toRgbSolid(selectedSeedPreviewColor());
+        int areaRgb = toRgbSolid(selectedRoiColor());
+        double opacity = getOverlayOpacity();
 
         ColorProcessor cp = new ColorProcessor(w, h);
         int[] pixels = (int[]) cp.getPixels();
 
         for (int y = 0; y < h; y++) {
             for (int x = 0; x < w; x++) {
-                int label = (int) Math.round(labelIp.getPixelValue(x, y));
-                if (label <= 0) continue;
-                Integer st = statusMap.get(label);
-                if (st == null) continue;
-                int color;
-                switch (st) {
-                    case CcResult3D.STATUS_TOO_SMALL: color = COLOR_TOO_SMALL; break;
-                    case CcResult3D.STATUS_TOO_LARGE: color = COLOR_TOO_LARGE; break;
-                    default:                          color = COLOR_VALID;      break;
+                boolean isSeed = seedIp != null
+                    && (int) Math.round(seedIp.getPixelValue(x, y)) > 0;
+                int finalLabel = (int) Math.round(finalIp.getPixelValue(x, y));
+                if (isSeed) {
+                    pixels[y * w + x] = seedRgb;
+                } else if (finalLabel > 0) {
+                    pixels[y * w + x] = areaRgb;
                 }
-                pixels[y * w + x] = color;
             }
         }
 
         ImageRoi iroi = new ImageRoi(0, 0, cp);
         iroi.setZeroTransparent(true);
-        iroi.setOpacity(1.0); // alpha already encoded in each pixel
+        iroi.setOpacity(opacity);
         Overlay overlay = new Overlay();
         overlay.add(iroi);
         imp.setOverlay(overlay);
         imp.updateAndDraw();
 
         ImagePlus zp = getZProjImp();
-        if (zp != null) renderOverlayOnZProj(cc, statusMap, zp);
+        if (zp != null) renderOverlayOnZProj(seedSeg, finalSeg, areaEn, zp);
+    }
+
+    /** Solid RGB pixel value (no alpha) for ImageRoi fill. */
+    private static int toRgbSolid(Color c) {
+        return (c.getRed() << 16) | (c.getGreen() << 8) | c.getBlue();
+    }
+
+    /** Overlay opacity from the input field, clamped to [0, 100] and converted to 0.0–1.0. */
+    private double getOverlayOpacity() {
+        try {
+            int v = Integer.parseInt(overlayOpacityField.getText().trim());
+            return Math.max(0, Math.min(100, v)) / 100.0;
+        } catch (NumberFormatException ex) {
+            return 0.5;
+        }
     }
 
     /**
-     * Render valid-spot ROI outlines for the current Z-plane as an overlay.
-     * Shows exactly the ROIs that would be saved, without touching the ROI Manager.
+     * ROI Preview overlay with dual-color coding:
+     *   cyan   = seed segmentation (seedSeg labels)
+     *   yellow = final segmentation (finalSeg labels)
+     * When areaEnabled=false, seed==final so only yellow is drawn.
      */
-    private void renderRoiOverlay(SegmentationResult3D seg, int zPlane) {
-        if (seg == null || seg.labelImage == null) return;
-        if (zPlane < 1 || zPlane > seg.labelImage.getNSlices()) return;
+    private void renderRoiOverlay(SegmentationResult3D seedSeg,
+                                   SegmentationResult3D finalSeg,
+                                   boolean areaEnabled, int zPlane) {
+        if (finalSeg == null || finalSeg.labelImage == null) return;
+        int nSlices = finalSeg.labelImage.getNSlices();
+        if (zPlane < 1 || zPlane > nSlices) return;
 
-        ImageProcessor labelIp = seg.labelImage.getStack().getProcessor(zPlane);
+        Overlay overlay = new Overlay();
+
+        // Draw seed outlines (only when area is enabled and seedSeg differs from finalSeg)
+        if (areaEnabled && seedSeg != null && seedSeg.labelImage != null
+                && zPlane <= seedSeg.labelImage.getNSlices()) {
+            addLabelOutlines(seedSeg.labelImage.getStack().getProcessor(zPlane),
+                             selectedSeedPreviewColor(), overlay);
+        }
+
+        // Draw area outlines
+        addLabelOutlines(finalSeg.labelImage.getStack().getProcessor(zPlane),
+                         selectedRoiColor(), overlay);
+
+        imp.setOverlay(overlay);
+        imp.updateAndDraw();
+
+        ImagePlus zp = getZProjImp();
+        if (zp != null) renderRoiOverlayOnZProj(seedSeg, finalSeg, areaEnabled, zp);
+    }
+
+    /**
+     * Extract per-label outlines from a label image slice and add to the overlay.
+     * Uses bounding-box cropping: O(W*H) single pass to collect bboxes, then
+     * ThresholdToSelection runs only on each label's bbox crop (O(Ai) per label).
+     */
+    private static void addLabelOutlines(ImageProcessor labelIp, Color color, Overlay overlay) {
         int w = labelIp.getWidth(), h = labelIp.getHeight();
 
-        // Phase 1: single pass — bounding box per label
+        // Phase 1: single pass — record bounding box per label
+        // bbox[label] = {minX, minY, maxX, maxY}
         HashMap<Integer, int[]> bboxMap = new HashMap<>();
         for (int y = 0; y < h; y++) {
             for (int x = 0; x < w; x++) {
@@ -647,8 +806,7 @@ public class SpotQuantifier3DFrame extends PlugInFrame {
             }
         }
 
-        // Phase 2: per label, fill only bbox crop (+1px padding for closed boundary)
-        Overlay overlay = new Overlay();
+        // Phase 2: per label, fill only the bbox region (+1px padding for closed boundary)
         for (Map.Entry<Integer, int[]> entry : bboxMap.entrySet()) {
             int label = entry.getKey();
             int[] bb = entry.getValue();
@@ -666,21 +824,18 @@ public class SpotQuantifier3DFrame extends PlugInFrame {
             bp.setThreshold(255, 255, ImageProcessor.NO_LUT_UPDATE);
             Roi roi = ThresholdToSelection.run(new ImagePlus("", bp));
             if (roi == null) continue;
+            // Translate roi from bbox-local coords back to full-image coords
             roi.setLocation(roi.getXBase() + x0, roi.getYBase() + y0);
-            roi.setStrokeColor(selectedRoiColor());
+            roi.setStrokeColor(color);
             overlay.add(roi);
         }
-        imp.setOverlay(overlay);
-        imp.updateAndDraw();
-
-        ImagePlus zp = getZProjImp();
-        if (zp != null) renderRoiOverlayOnZProj(seg, zp);
     }
 
     // =========================================================
     // Z-projection overlay rendering
     // =========================================================
 
+    /** Returns the selected Z-proj ImagePlus, or null if None / closed / size mismatch. */
     private ImagePlus getZProjImp() {
         String title = zprojChoice.getSelectedItem();
         if (title == null || "None".equals(title)) return null;
@@ -690,6 +845,7 @@ public class SpotQuantifier3DFrame extends PlugInFrame {
         return zp;
     }
 
+    /** Rebuild the Z-proj choice list from currently open images (excluding imp). */
     private void refreshZProjChoiceItems() {
         String current = zprojChoice.getSelectedItem();
         zprojChoice.removeAll();
@@ -707,73 +863,83 @@ public class SpotQuantifier3DFrame extends PlugInFrame {
         if (current != null) zprojChoice.select(current);
     }
 
-    /** Called when Z-proj selection changes — re-render without re-segmenting. */
-    private void onZProjChanged() {
-        if (previewOff.getState() || cachedCc == null) {
-            // Clear overlay on any previously selected Z-proj window
-            ImagePlus zp = getZProjImp();
-            if (zp != null) { zp.setOverlay((Overlay) null); zp.updateAndDraw(); }
-            return;
+    /** Overlay mode on Z-proj: uses cached typeMap; rebuilds only when cache is null. */
+    private void renderOverlayOnZProj(SegmentationResult3D seedSeg, SegmentationResult3D finalSeg,
+                                       boolean areaEn, ImagePlus zp) {
+        if (finalSeg == null || finalSeg.labelImage == null) return;
+        int w = finalSeg.labelImage.getWidth();
+        int h = finalSeg.labelImage.getHeight();
+
+        // Build typeMap once per segmentation result
+        if (cachedZProjTypeMap == null) {
+            int d = finalSeg.labelImage.getNSlices();
+            boolean hasSeed = areaEn && seedSeg != null && seedSeg.labelImage != null;
+            cachedZProjTypeMap = new int[w * h];
+            for (int y = 0; y < h; y++) {
+                for (int x = 0; x < w; x++) {
+                    int type = 0;
+                    for (int z = 1; z <= d; z++) {
+                        if (hasSeed && z <= seedSeg.labelImage.getNSlices()
+                                && (int) Math.round(seedSeg.labelImage.getStack()
+                                        .getProcessor(z).getPixelValue(x, y)) > 0) {
+                            type = 1; // seed — highest priority
+                            break;
+                        }
+                        if ((int) Math.round(finalSeg.labelImage.getStack()
+                                .getProcessor(z).getPixelValue(x, y)) > 0) {
+                            type = 2; // area-only
+                        }
+                    }
+                    cachedZProjTypeMap[y * w + x] = type;
+                }
+            }
         }
-        QuantifierParams params = buildParams();
-        Map<Integer, Integer> status = cachedCc.classifyLabels(params, voxelVol);
-        int zPlane = imp.getCurrentSlice();
-        if (previewRoi.getState())
-            renderRoiOverlay(cachedCc.buildFilteredResult(status), zPlane);
-        else
-            renderOverlay(cachedCc, status, zPlane);
-    }
 
-    private void renderOverlayOnZProj(CcResult3D cc, Map<Integer, Integer> statusMap, ImagePlus zp) {
-        if (cc == null || cc.labelImage == null) return;
-        int w = cc.labelImage.getWidth(), h = cc.labelImage.getHeight();
-        int d = cc.labelImage.getNSlices();
-
+        // Apply current colors to typeMap (fast, no label image scan)
+        int seedRgb = toRgbSolid(selectedSeedPreviewColor());
+        int areaRgb = toRgbSolid(selectedRoiColor());
         ColorProcessor cp = new ColorProcessor(w, h);
         int[] pixels = (int[]) cp.getPixels();
-
-        for (int y = 0; y < h; y++) {
-            for (int x = 0; x < w; x++) {
-                int color = 0;
-                for (int z = 1; z <= d; z++) {
-                    int label = (int) Math.round(
-                        cc.labelImage.getStack().getProcessor(z).getPixelValue(x, y));
-                    if (label <= 0) continue;
-                    Integer st = statusMap.get(label);
-                    if (st == null) continue;
-                    int c;
-                    switch (st) {
-                        case CcResult3D.STATUS_TOO_SMALL: c = COLOR_TOO_SMALL; break;
-                        case CcResult3D.STATUS_TOO_LARGE: c = COLOR_TOO_LARGE; break;
-                        default:                          c = COLOR_VALID;      break;
-                    }
-                    // valid > too_large > too_small in priority (last write wins,
-                    // so process in that order — just take first non-zero hit)
-                    color = c;
-                    break;
-                }
-                pixels[y * w + x] = color;
-            }
+        for (int i = 0; i < cachedZProjTypeMap.length; i++) {
+            if      (cachedZProjTypeMap[i] == 1) pixels[i] = seedRgb;
+            else if (cachedZProjTypeMap[i] == 2) pixels[i] = areaRgb;
         }
 
         ImageRoi iroi = new ImageRoi(0, 0, cp);
         iroi.setZeroTransparent(true);
-        iroi.setOpacity(1.0);
+        iroi.setOpacity(getOverlayOpacity());
         Overlay overlay = new Overlay();
         overlay.add(iroi);
         zp.setOverlay(overlay);
         zp.updateAndDraw();
     }
 
-    private void renderRoiOverlayOnZProj(SegmentationResult3D seg, ImagePlus zp) {
-        if (seg == null || seg.labelImage == null) return;
+    /** ROI mode on Z-proj: uses cached ROI shapes; rebuilds only when cache is null. */
+    private void renderRoiOverlayOnZProj(SegmentationResult3D seedSeg, SegmentationResult3D finalSeg,
+                                          boolean areaEn, ImagePlus zp) {
+        if (finalSeg == null || finalSeg.labelImage == null) return;
+
+        // Build ROI shape lists once per segmentation result
+        if (cachedZProjAreaRois == null) {
+            cachedZProjAreaRois = buildLabelUnionRois(finalSeg.labelImage);
+            cachedZProjSeedRois = (areaEn && seedSeg != null && seedSeg.labelImage != null)
+                                  ? buildLabelUnionRois(seedSeg.labelImage) : null;
+        }
+
+        // Apply current colors to cached ROI shapes and build overlay (fast)
         Overlay overlay = new Overlay();
-        addLabelUnionOutlines(seg.labelImage, selectedRoiColor(), overlay);
+        if (cachedZProjSeedRois != null) {
+            Color sc = selectedSeedPreviewColor();
+            for (Roi r : cachedZProjSeedRois) { r.setStrokeColor(sc); overlay.add(r); }
+        }
+        Color ac = selectedRoiColor();
+        for (Roi r : cachedZProjAreaRois) { r.setStrokeColor(ac); overlay.add(r); }
         zp.setOverlay(overlay);
         zp.updateAndDraw();
     }
 
-    private static void addLabelUnionOutlines(ImagePlus labelImp, Color color, Overlay overlay) {
+    /** Build union-projected ROI outlines for every label in labelImp. */
+    private static List<Roi> buildLabelUnionRois(ImagePlus labelImp) {
         int w = labelImp.getWidth(), h = labelImp.getHeight(), d = labelImp.getNSlices();
         TreeSet<Integer> labels = new TreeSet<>();
         for (int z = 1; z <= d; z++) {
@@ -784,6 +950,42 @@ public class SpotQuantifier3DFrame extends PlugInFrame {
                     if (v > 0) labels.add(v);
                 }
         }
+        List<Roi> rois = new java.util.ArrayList<>();
+        for (int label : labels) {
+            ByteProcessor bp = new ByteProcessor(w, h);
+            byte[] bpix = (byte[]) bp.getPixels();
+            for (int z = 1; z <= d; z++) {
+                ImageProcessor ip = labelImp.getStack().getProcessor(z);
+                for (int y = 0; y < h; y++)
+                    for (int x = 0; x < w; x++)
+                        if ((int) Math.round(ip.getPixelValue(x, y)) == label)
+                            bpix[y * w + x] = (byte) 255;
+            }
+            bp.setThreshold(255, 255, ImageProcessor.NO_LUT_UPDATE);
+            Roi roi = ThresholdToSelection.run(new ImagePlus("", bp));
+            if (roi != null) rois.add(roi);
+        }
+        return rois;
+    }
+
+    /**
+     * For each label in labelImp, compute the Z-union mask across all slices,
+     * convert to a 2D ROI via ThresholdToSelection, and add to the overlay.
+     */
+    private static void addLabelUnionOutlines(ImagePlus labelImp, Color color, Overlay overlay) {
+        int w = labelImp.getWidth(), h = labelImp.getHeight(), d = labelImp.getNSlices();
+
+        // Collect all label IDs present in the stack
+        TreeSet<Integer> labels = new TreeSet<>();
+        for (int z = 1; z <= d; z++) {
+            ImageProcessor ip = labelImp.getStack().getProcessor(z);
+            for (int y = 0; y < h; y++)
+                for (int x = 0; x < w; x++) {
+                    int v = (int) Math.round(ip.getPixelValue(x, y));
+                    if (v > 0) labels.add(v);
+                }
+        }
+
         for (int label : labels) {
             ByteProcessor bp = new ByteProcessor(w, h);
             byte[] bpix = (byte[]) bp.getPixels();
@@ -810,44 +1012,29 @@ public class SpotQuantifier3DFrame extends PlugInFrame {
     }
 
     // =========================================================
-    // CC cache
+    // Segmentation cache
     // =========================================================
 
-    private synchronized CcResult3D getOrComputeCC(QuantifierParams params) {
-        String key = ccKey(params);
-        if (ccCacheKey != null && ccCacheKey.equals(key) && cachedCc != null) {
-            return cachedCc;
+    private synchronized SeededQuantifier3D.SeededResult getOrComputeSeeded(
+            QuantifierParams params, int at, int st, boolean areaEn) {
+        String key = segKey(params, at, st, areaEn);
+        if (segCacheKey != null && segCacheKey.equals(key) && cachedSeededResult != null) {
+            return cachedSeededResult;
         }
         try {
-            cachedCc   = SpotQuantifier3D.computeCC(imp, params);
-            ccCacheKey = key;
-            // Update vol slider ranges from CC result
-            if (!cachedCc.voxelCounts.isEmpty()) {
-                EventQueue.invokeLater(this::updateVolSliderRanges);
-            }
-            return cachedCc;
+            cachedSeededResult = SeededQuantifier3D.compute(imp, at, st, params, voxelVol, areaEn);
+            segCacheKey        = key;
+            return cachedSeededResult;
         } catch (Exception ex) {
-            IJ.log("Spot Quantifier 3D preview error: " + ex.getMessage());
+            IJ.log("Seeded Spot Quantifier 3D preview error: " + ex.getMessage());
             return null;
         }
     }
 
-    private String ccKey(QuantifierParams p) {
-        return p.threshold + ":" + p.gaussianBlur + ":" + p.gaussXY + ":" + p.gaussZ
-             + ":" + p.connectivity + ":" + p.fillHoles;
-    }
-
-    private void updateVolSliderRanges() {
-        if (cachedCc == null || cachedCc.voxelCounts.isEmpty()) return;
-        volRangeMin = cachedCc.minVolUm3(voxelVol);
-        volRangeMax = cachedCc.maxVolUm3(voxelVol);
-        if (volRangeMin <= 0) volRangeMin = voxelVol;
-        if (volRangeMax <= volRangeMin) volRangeMax = volRangeMin * 10;
-        // Don't reset current values, just clamp sliders
-        syncing = true;
-        minVolBar.setValue(volToSlider(minVolVal));
-        maxVolBar.setValue(volToSlider(maxVolVal));
-        syncing = false;
+    private String segKey(QuantifierParams p, int at, int st, boolean areaEn) {
+        return at + ":" + st + ":" + areaEn + ":" + p.gaussianBlur + ":" + p.gaussXY
+             + ":" + p.gaussZ + ":" + p.connectivity + ":" + p.fillHoles
+             + ":" + p.minVolUm3 + ":" + p.maxVolUm3;
     }
 
     // =========================================================
@@ -857,31 +1044,29 @@ public class SpotQuantifier3DFrame extends PlugInFrame {
     private void runApply() {
         if (previewOff.getState()) return;
         statusLabel.setText("Computing...");
-        IJ.showStatus("Spot Quantifier 3D: computing...");
+        IJ.showStatus("Seeded Spot Quantifier 3D: computing...");
         boolean roiMode = previewRoi.getState();
         int gen = previewGen.incrementAndGet();
         cancelPreviewTask();
         int zPlane = imp.getCurrentSlice();
         QuantifierParams params = buildParams();
+        int at = areaThreshold;
+        int st = seedThreshold;
+        boolean areaEn = areaEnabled;
         previewTask = new TimerTask() {
             @Override public void run() {
-                CcResult3D cc = getOrComputeCC(params);
-                if (cc == null || previewGen.get() != gen) {
+                SeededQuantifier3D.SeededResult r = getOrComputeSeeded(params, at, st, areaEn);
+                if (r == null || previewGen.get() != gen) {
                     EventQueue.invokeLater(() -> statusLabel.setText("No spots found."));
                     return;
                 }
-                Map<Integer, Integer> status = cc.classifyLabels(params, voxelVol);
-                long nValid    = status.values().stream().filter(v -> v == CcResult3D.STATUS_VALID).count();
-                long nTooSmall = status.values().stream().filter(v -> v == CcResult3D.STATUS_TOO_SMALL).count();
-                long nTooLarge = status.values().stream().filter(v -> v == CcResult3D.STATUS_TOO_LARGE).count();
-                String msg = nValid + " spot" + (nValid != 1 ? "s" : "")
-                        + (nTooSmall > 0 ? "  (" + nTooSmall + " too small)" : "")
-                        + (nTooLarge > 0 ? "  (" + nTooLarge + " too large)" : "");
-                IJ.showStatus("Spot Quantifier 3D: " + msg);
+                int nSpots = (int) Math.round(r.finalSeg.labelImage.getStatistics().max);
+                String msg = nSpots + " spot" + (nSpots != 1 ? "s" : "");
+                IJ.showStatus("Seeded Spot Quantifier 3D: " + msg);
                 EventQueue.invokeLater(() -> {
                     if (previewGen.get() != gen) return;
-                    if (roiMode) renderRoiOverlay(cc.buildFilteredResult(status), zPlane);
-                    else         renderOverlay(cc, status, zPlane);
+                    if (roiMode) renderRoiOverlay(r.seedSeg, r.finalSeg, areaEn, zPlane);
+                    else         renderOverlay(r.seedSeg, r.finalSeg, areaEn, zPlane);
                     statusLabel.setText(msg);
                 });
             }
@@ -890,13 +1075,13 @@ public class SpotQuantifier3DFrame extends PlugInFrame {
     }
 
     private void runAddRoi() {
-        SegmentationResult3D seg = computeFilteredSeg();
+        SegmentationResult3D seg = computeSeg();
         if (seg == null) return;
         new RoiExporter3D().exportToRoiManager(seg.labelImage, selectedRoiColor());
     }
 
     private void runSaveRoi() {
-        SegmentationResult3D seg = computeFilteredSeg();
+        SegmentationResult3D seg = computeSeg();
         if (seg == null) return;
         RoiManager rm = RoiManager.getRoiManager();
         if (rm == null || rm.getCount() == 0) {
@@ -905,43 +1090,39 @@ public class SpotQuantifier3DFrame extends PlugInFrame {
         FileDialog fd = new FileDialog(this, "Save ROIs as ZIP", FileDialog.SAVE);
         fd.setFile(imp.getShortTitle() + "_RoiSet.zip");
         fd.setVisible(true);
-        String dir = fd.getDirectory();
+        String dir  = fd.getDirectory();
         String name = fd.getFile();
         if (dir == null || name == null) return;
         RoiExporter.saveRoiManagerToZip(dir + name);
     }
 
-    /** Save CSV only (no params, no ROI). */
     private void runSaveCsvOnly() {
         List<SpotMeasurement> spots = computeSpots();
         if (spots == null) return;
-
         FileDialog fd = new FileDialog(this, "Save CSV", FileDialog.SAVE);
         fd.setFile(imp.getShortTitle() + "_spots.csv");
         fd.setVisible(true);
-        String dirStr = fd.getDirectory();
-        String name   = fd.getFile();
-        if (dirStr == null || name == null) return;
-
-        File csvFile = new File(dirStr, name.endsWith(".csv") ? name : name + ".csv");
+        String dir  = fd.getDirectory();
+        String name = fd.getFile();
+        if (dir == null || name == null) return;
         try {
-            CsvExporter.writeCsv(spots, csvFile);
-            IJ.showMessage("Saved", spots.size() + " spot(s) → " + csvFile.getName());
+            CsvExporter.writeCsv(spots, new File(dir, name));
         } catch (Exception ex) {
-            IJ.error("Spot Quantifier 3D", "Save failed: " + ex.getMessage());
+            IJ.error("Seeded Spot Quantifier 3D", "CSV save failed: " + ex.getMessage());
         }
     }
 
-    /** Save CSV + params.txt + ROI ZIP (all 3) for the current image. */
     private void runSaveAll() {
         QuantifierParams params = buildParams();
-        FileDialog fd = new FileDialog(this, "Choose output folder (select any file inside it)", FileDialog.SAVE);
+        FileDialog fd = new FileDialog(this, "Choose output folder (select any file inside it)",
+            FileDialog.SAVE);
         fd.setFile(imp.getShortTitle() + "_spots.csv");
         fd.setVisible(true);
         if (fd.getDirectory() == null || fd.getFile() == null) return;
 
         File outDir = new File(fd.getDirectory());
-        String err = saveOneToDir(imp, params, outDir, selectedRoiColor());
+        String err = saveOneToDir(imp, areaThreshold, seedThreshold, areaEnabled, params,
+            outDir, selectedRoiColor());
         if (err == null) {
             String basename = imp.getShortTitle().replaceAll("\\.tiff?$", "");
             IJ.showMessage("Saved",
@@ -950,56 +1131,16 @@ public class SpotQuantifier3DFrame extends PlugInFrame {
                 "roi/" + basename + "_RoiSet.zip\n" +
                 "params.txt");
         } else {
-            IJ.error("Spot Quantifier 3D", "Save failed: " + err);
-        }
-    }
-
-    /**
-     * Process one image with the given params and save csv/roi/params under outDir.
-     * Returns null on success, error message string on failure.
-     */
-    private static String saveOneToDir(ImagePlus target, QuantifierParams params, File outDir,
-                                       java.awt.Color roiColor) {
-        Calibration cal = target.getCalibration();
-        double tw = cal.pixelWidth  > 0 ? cal.pixelWidth  : 1;
-        double th = cal.pixelHeight > 0 ? cal.pixelHeight : 1;
-        double td = cal.pixelDepth  > 0 ? cal.pixelDepth  : 1;
-        double tVoxelVol = tw * th * td;
-
-        CcResult3D cc = SpotQuantifier3D.computeCC(target, params);
-        if (cc == null || cc.voxelCounts.isEmpty()) return "no spots detected";
-
-        Map<Integer, Integer> status = cc.classifyLabels(params, tVoxelVol);
-        SegmentationResult3D seg = cc.buildFilteredResult(status);
-        List<SpotMeasurement> spots = SpotMeasurer.measure(seg, target, tw, th, td);
-
-        File csvDir = new File(outDir, "csv");
-        File roiDir = new File(outDir, "roi");
-        csvDir.mkdirs();
-        roiDir.mkdirs();
-
-        String basename   = target.getShortTitle().replaceAll("\\.tiff?$", "");
-        File   csvFile    = new File(csvDir, basename + "_spots.csv");
-        File   paramsFile = new File(outDir, "params.txt");
-        File   roiFile    = new File(roiDir, basename + "_RoiSet.zip");
-        try {
-            CsvExporter.writeCsv(spots, csvFile);
-            CsvExporter.writeParams(params, paramsFile);
-            RoiManager rm = RoiManager.getRoiManager();
-            rm.reset();
-            new RoiExporter3D().exportToRoiManager(seg.labelImage, roiColor);
-            if (rm.getCount() > 0) {
-                RoiExporter.saveRoiManagerToZip(roiFile.getAbsolutePath());
-            }
-            return null;
-        } catch (Exception ex) {
-            return ex.getMessage();
+            IJ.error("Seeded Spot Quantifier 3D", "Save failed: " + err);
         }
     }
 
     /** Batch: apply current params to all TIFFs in a folder, save to output folder. */
     private void runBatch() {
         QuantifierParams params = buildParams();
+        int batchAreaThreshold = areaThreshold;
+        int batchSeedThreshold = seedThreshold;
+        boolean batchAreaEnabled = areaEnabled;
         java.awt.Color batchRoiColor = selectedRoiColor();
 
         String inDirStr = IJ.getDirectory("Select input folder");
@@ -1020,7 +1161,6 @@ public class SpotQuantifier3DFrame extends PlugInFrame {
             return;
         }
         Arrays.sort(files);
-
         batchBtn.setEnabled(false);
 
         new SwingWorker<int[], String>() {
@@ -1029,7 +1169,8 @@ public class SpotQuantifier3DFrame extends PlugInFrame {
                 int ok = 0, skipped = 0;
                 for (int i = 0; i < files.length; i++) {
                     IJ.showProgress(i, files.length);
-                    IJ.showStatus("Batch " + (i + 1) + "/" + files.length + ": " + files[i].getName());
+                    IJ.showStatus("Batch " + (i + 1) + "/" + files.length
+                        + ": " + files[i].getName());
 
                     ImagePlus target = IJ.openImage(files[i].getAbsolutePath());
                     if (target == null) {
@@ -1044,7 +1185,8 @@ public class SpotQuantifier3DFrame extends PlugInFrame {
                         continue;
                     }
 
-                    String err = saveOneToDir(target, params, outDir, batchRoiColor);
+                    String err = saveOneToDir(target, batchAreaThreshold, batchSeedThreshold,
+                        batchAreaEnabled, params, outDir, batchRoiColor);
                     target.close();
                     if (err != null) {
                         publish("Batch SKIP (" + err + "): " + files[i].getName());
@@ -1081,60 +1223,92 @@ public class SpotQuantifier3DFrame extends PlugInFrame {
         }.execute();
     }
 
-    private List<SpotMeasurement> computeSpots() {
-        QuantifierParams params = buildParams();
-        CcResult3D cc = getOrComputeCC(params);
-        if (cc == null || cc.voxelCounts.isEmpty()) {
-            IJ.error("Spot Quantifier 3D", "No spots detected — adjust threshold.");
-            return null;
-        }
-        Map<Integer, Integer> status = cc.classifyLabels(params, voxelVol);
-        SegmentationResult3D seg = cc.buildFilteredResult(status);
-        return SpotMeasurer.measure(seg, imp, vw, vh, vd);
-    }
+    /**
+     * Process one image and save csv/roi/params under outDir.
+     * Returns null on success, error message string on failure.
+     */
+    private static String saveOneToDir(ImagePlus target, int at, int st, boolean areaEn,
+                                        QuantifierParams params, File outDir,
+                                        java.awt.Color roiColor) {
+        Calibration cal = target.getCalibration();
+        double tw = cal.pixelWidth  > 0 ? cal.pixelWidth  : 1;
+        double th = cal.pixelHeight > 0 ? cal.pixelHeight : 1;
+        double td = cal.pixelDepth  > 0 ? cal.pixelDepth  : 1;
+        double tVoxelVol = tw * th * td;
 
-    private SegmentationResult3D computeFilteredSeg() {
-        QuantifierParams params = buildParams();
-        CcResult3D cc = getOrComputeCC(params);
-        if (cc == null) { IJ.error("Spot Quantifier 3D", "No spots detected."); return null; }
-        Map<Integer, Integer> status = cc.classifyLabels(params, voxelVol);
-        return cc.buildFilteredResult(status);
-    }
+        SeededQuantifier3D.SeededResult r = SeededQuantifier3D.compute(
+            target, at, st, params, tVoxelVol, areaEn);
+        if (r == null) return "no spots detected";
+        SegmentationResult3D seg = r.finalSeg;
 
-    // =========================================================
-    // Z-watch
-    // =========================================================
+        List<SpotMeasurement> spots = SpotMeasurer.measure(seg, target, tw, th, td);
 
-    private void startZWatch() {
-        lastZ = imp.getCurrentSlice();
-        zWatchTimer.scheduleAtFixedRate(new TimerTask() {
-            @Override public void run() {
-                int z = imp.getCurrentSlice();
-                if (z != lastZ) {
-                    lastZ = z;
-                    EventQueue.invokeLater(() -> updatePreviewForZChange());
-                }
+        File csvDir = new File(outDir, "csv");
+        File roiDir = new File(outDir, "roi");
+        csvDir.mkdirs();
+        roiDir.mkdirs();
+
+        String basename   = target.getShortTitle().replaceAll("\\.tiff?$", "");
+        File   csvFile    = new File(csvDir, basename + "_spots.csv");
+        File   paramsFile = new File(outDir, "params.txt");
+        File   roiFile    = new File(roiDir, basename + "_RoiSet.zip");
+        try {
+            CsvExporter.writeCsv(spots, csvFile);
+            CsvExporter.writeSeededParams(at, st, params, paramsFile);
+            RoiManager rm = RoiManager.getRoiManager();
+            rm.reset();
+            new RoiExporter3D().exportToRoiManager(seg.labelImage, roiColor);
+            if (rm.getCount() > 0) {
+                RoiExporter.saveRoiManagerToZip(roiFile.getAbsolutePath());
             }
-        }, 300, 300);
+            return null;
+        } catch (Exception ex) {
+            return ex.getMessage();
+        }
     }
 
     // =========================================================
     // Helpers
     // =========================================================
 
+    private List<SpotMeasurement> computeSpots() {
+        QuantifierParams params = buildParams();
+        SeededQuantifier3D.SeededResult r = getOrComputeSeeded(params, areaThreshold,
+                                                                seedThreshold, areaEnabled);
+        if (r == null) {
+            IJ.error("Seeded Spot Quantifier 3D", "No spots detected — adjust thresholds.");
+            return null;
+        }
+        return SpotMeasurer.measure(r.finalSeg, imp, vw, vh, vd);
+    }
+
+    private SegmentationResult3D computeSeg() {
+        QuantifierParams params = buildParams();
+        SeededQuantifier3D.SeededResult r = getOrComputeSeeded(params, areaThreshold,
+                                                                seedThreshold, areaEnabled);
+        if (r == null) {
+            IJ.error("Seeded Spot Quantifier 3D", "No spots detected.");
+            return null;
+        }
+        return r.finalSeg;
+    }
+
     private QuantifierParams buildParams() {
         Double minVol = minVolEnabled ? minVolVal : null;
         Double maxVol = maxVolEnabled ? maxVolVal : null;
         int conn = Integer.parseInt(connectivityChoice.getSelectedItem());
         boolean fillH = fillHolesCheck.getState();
-        return new QuantifierParams(threshold, minVol, maxVol, gaussEnabled, gaussXYVal, gaussZVal,
-                                    conn, fillH);
+        // threshold field: use areaThreshold as placeholder (SeededQuantifier3D ignores it)
+        return new QuantifierParams(areaThreshold, minVol, maxVol,
+            gaussEnabled, gaussXYVal, gaussZVal, conn, fillH);
     }
 
-    /** Returns the Color corresponding to the current roiColorChoice selection. */
-    private java.awt.Color selectedRoiColor() {
-        int idx = roiColorChoice.getSelectedIndex();
-        return RoiExporter3D.decodeColor(RoiExporter3D.ROI_COLOR_OPTIONS[idx][1]);
+    private Color selectedSeedPreviewColor() {
+        return Color.decode(PREVIEW_COLOR_OPTIONS[seedColorChoice.getSelectedIndex()][1]);
+    }
+
+    private Color selectedRoiColor() {
+        return Color.decode(PREVIEW_COLOR_OPTIONS[roiColorChoice.getSelectedIndex()][1]);
     }
 
     /** Volume slider uses log scale over [volRangeMin, volRangeMax]. */
@@ -1168,6 +1342,23 @@ public class SpotQuantifier3DFrame extends PlugInFrame {
 
     private static double parseDoubleOr(String s, double fallback) {
         try { return Double.parseDouble(s.trim()); } catch (Exception ex) { return fallback; }
+    }
+
+    // =========================================================
+    // Z-watch
+    // =========================================================
+
+    private void startZWatch() {
+        lastZ = imp.getCurrentSlice();
+        zWatchTimer.scheduleAtFixedRate(new TimerTask() {
+            @Override public void run() {
+                int z = imp.getCurrentSlice();
+                if (z != lastZ) {
+                    lastZ = z;
+                    EventQueue.invokeLater(() -> updatePreviewForZChange());
+                }
+            }
+        }, 300, 300);
     }
 
     private void placeNearImage() {

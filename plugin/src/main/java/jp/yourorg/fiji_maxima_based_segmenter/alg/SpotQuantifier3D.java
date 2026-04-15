@@ -30,11 +30,6 @@ public class SpotQuantifier3D {
      * @return CcResult3D with full label image and voxel-count map
      */
     public static CcResult3D computeCC(ImagePlus imp, QuantifierParams params) {
-        int w = imp.getWidth();
-        int h = imp.getHeight();
-        int d = imp.getNSlices();
-
-        // --- 1. Optional Gaussian blur on a duplicate ---
         ImagePlus working = imp;
         if (params.gaussianBlur) {
             working = imp.duplicate();
@@ -42,9 +37,30 @@ public class SpotQuantifier3D {
             IJ.run(working, "Gaussian Blur 3D...",
                 "x=" + params.gaussXY + " y=" + params.gaussXY + " z=" + params.gaussZ);
         }
+        try {
+            return computeCCFromBlurred(working, params.threshold, params);
+        } finally {
+            if (params.gaussianBlur && working != imp) working.close();
+        }
+    }
 
-        // --- 2. Build binary stack: pixels >= threshold → 255, else 0 ---
-        ImageStack srcStack    = working.getStack();
+    /**
+     * Run CC labeling on an already-blurred (or raw) image at the given threshold.
+     * Gaussian blur is NOT applied; the caller manages image lifecycle.
+     * Used by SeededQuantifier3D to reuse a single blurred copy across two threshold passes.
+     *
+     * @param blurred   Pre-blurred image (or raw if blur is disabled)
+     * @param threshold Intensity threshold for binarization
+     * @param params    Quantifier params (connectivity, fillHoles used; threshold ignored)
+     */
+    public static CcResult3D computeCCFromBlurred(ImagePlus blurred, int threshold,
+                                                   QuantifierParams params) {
+        int w = blurred.getWidth();
+        int h = blurred.getHeight();
+        int d = blurred.getNSlices();
+
+        // --- 1. Build binary stack: pixels >= threshold → 255, else 0 ---
+        ImageStack srcStack    = blurred.getStack();
         ImageStack binaryStack = new ImageStack(w, h);
         for (int z = 1; z <= d; z++) {
             ImageProcessor ip = srcStack.getProcessor(z);
@@ -52,7 +68,7 @@ public class SpotQuantifier3D {
             byte[] bpix = (byte[]) bp.getPixels();
             for (int y = 0; y < h; y++) {
                 for (int x = 0; x < w; x++) {
-                    if (ip.get(x, y) >= params.threshold) {
+                    if (ip.get(x, y) >= threshold) {
                         bpix[y * w + x] = (byte) 255;
                     }
                 }
@@ -60,22 +76,18 @@ public class SpotQuantifier3D {
             binaryStack.addSlice(bp);
         }
 
-        if (params.gaussianBlur && working != imp) {
-            working.close();
-        }
-
-        // --- 3. Optional fill holes (per-slice 2D) ---
+        // --- 2. Optional fill holes (per-slice 2D) ---
         ImagePlus binaryImp = new ImagePlus("binary", binaryStack);
         if (params.fillHoles) {
             IJ.run(binaryImp, "Fill Holes", "stack");
         }
 
-        // --- 4. 3D connected-components labeling (32-bit labels) ---
+        // --- 3. 3D connected-components labeling (32-bit labels) ---
         // 32-bit avoids the 65535 label cap when many noise CCs are present above threshold.
         ImagePlus labelImp  = BinaryImages.componentsLabeling(binaryImp, params.connectivity, 32);
         ImageStack labelStack = labelImp.getStack();
 
-        // --- 5. Count voxels per label ---
+        // --- 4. Count voxels per label ---
         Map<Integer, Long> voxelCounts = new HashMap<>();
         for (int z = 1; z <= d; z++) {
             ImageProcessor ip = labelStack.getProcessor(z);
@@ -89,7 +101,7 @@ public class SpotQuantifier3D {
             }
         }
 
-        ImagePlus labelImage = new ImagePlus(imp.getShortTitle() + "-cc", labelStack);
+        ImagePlus labelImage = new ImagePlus(blurred.getShortTitle() + "-cc", labelStack);
         return new CcResult3D(labelImage, voxelCounts);
     }
 }

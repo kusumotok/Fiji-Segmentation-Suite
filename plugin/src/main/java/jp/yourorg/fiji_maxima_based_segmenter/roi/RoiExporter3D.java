@@ -9,14 +9,48 @@ import ij.plugin.frame.RoiManager;
 import ij.process.ByteProcessor;
 import ij.process.ImageProcessor;
 
+import java.awt.Color;
 import java.util.TreeSet;
 
 public class RoiExporter3D {
 
     /**
+     * Named ROI colors available in the UI.
+     * Each entry is { display name, hex color code }.
+     */
+    public static final String[][] ROI_COLOR_OPTIONS = {
+        { "Yellow",  "#FFFF00" },
+        { "Cyan",    "#00FFFF" },
+        { "Magenta", "#FF00FF" },
+        { "Red",     "#FF0000" },
+        { "Green",   "#00FF00" },
+        { "White",   "#FFFFFF" },
+    };
+
+    /** Default ROI color (yellow). */
+    public static final Color DEFAULT_ROI_COLOR = Color.decode(ROI_COLOR_OPTIONS[0][1]);
+
+    /**
+     * Decode a hex color string (e.g. "#FFFF00") to a Color.
+     */
+    public static Color decodeColor(String hex) {
+        return Color.decode(hex);
+    }
+
+    /**
      * Export 3D segmentation as 2D ROI slices with Position and Group attributes.
+     * Uses the default ROI color (yellow).
      */
     public void exportToRoiManager(ImagePlus labelImage) {
+        exportToRoiManager(labelImage, DEFAULT_ROI_COLOR);
+    }
+
+    /**
+     * Export 3D segmentation as 2D ROI slices with Position and Group attributes.
+     *
+     * @param roiColor stroke color applied to every exported ROI
+     */
+    public void exportToRoiManager(ImagePlus labelImage, Color roiColor) {
         if (labelImage == null) {
             IJ.error("Add ROI failed", "Label image is missing.");
             return;
@@ -39,7 +73,7 @@ public class RoiExporter3D {
         }
 
         if (labels.isEmpty()) {
-            IJ.error("Add ROI failed", "No objects found in label image.");
+            IJ.log("RoiExporter3D: no objects found in label image (skipping ROI export).");
             return;
         }
 
@@ -67,8 +101,8 @@ public class RoiExporter3D {
                 Roi roi = ThresholdToSelection.run(mask);
                 if (roi == null) continue;
 
-                roi.setPosition(0, z, 0);  // C=0, Z=z, T=0
-                roi.setGroup(label);
+                roi.setPosition(z);
+                roi.setStrokeColor(roiColor);
                 roi.setName(String.format("obj-%03d-z%03d", label, z));
                 rm.addRoi(roi);
             }
