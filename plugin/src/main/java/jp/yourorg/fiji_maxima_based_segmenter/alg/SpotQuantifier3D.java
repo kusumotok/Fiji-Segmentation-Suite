@@ -9,6 +9,8 @@ import inra.ijpb.binary.BinaryImages;
 
 import java.util.HashMap;
 import java.util.Map;
+import java.util.concurrent.CancellationException;
+import java.util.function.BooleanSupplier;
 
 /**
  * Core algorithm for 3D spot quantification:
@@ -30,6 +32,10 @@ public class SpotQuantifier3D {
      * @return CcResult3D with full label image and voxel-count map
      */
     public static CcResult3D computeCC(ImagePlus imp, QuantifierParams params) {
+        return computeCC(imp, params, null);
+    }
+
+    public static CcResult3D computeCC(ImagePlus imp, QuantifierParams params, BooleanSupplier shouldCancel) {
         ImagePlus working = imp;
         if (params.gaussianBlur) {
             working = imp.duplicate();
@@ -38,7 +44,7 @@ public class SpotQuantifier3D {
                 "x=" + params.gaussXY + " y=" + params.gaussXY + " z=" + params.gaussZ);
         }
         try {
-            return computeCCFromBlurred(working, params.threshold, params);
+            return computeCCFromBlurred(working, params.threshold, params, shouldCancel);
         } finally {
             if (params.gaussianBlur && working != imp) working.close();
         }
@@ -55,6 +61,11 @@ public class SpotQuantifier3D {
      */
     public static CcResult3D computeCCFromBlurred(ImagePlus blurred, int threshold,
                                                    QuantifierParams params) {
+        return computeCCFromBlurred(blurred, threshold, params, null);
+    }
+
+    public static CcResult3D computeCCFromBlurred(ImagePlus blurred, int threshold,
+                                                   QuantifierParams params, BooleanSupplier shouldCancel) {
         int w = blurred.getWidth();
         int h = blurred.getHeight();
         int d = blurred.getNSlices();
@@ -63,10 +74,12 @@ public class SpotQuantifier3D {
         ImageStack srcStack    = blurred.getStack();
         ImageStack binaryStack = new ImageStack(w, h);
         for (int z = 1; z <= d; z++) {
+            checkCancelled(shouldCancel);
             ImageProcessor ip = srcStack.getProcessor(z);
             ByteProcessor bp  = new ByteProcessor(w, h);
             byte[] bpix = (byte[]) bp.getPixels();
             for (int y = 0; y < h; y++) {
+                checkCancelled(shouldCancel);
                 for (int x = 0; x < w; x++) {
                     if (ip.get(x, y) >= threshold) {
                         bpix[y * w + x] = (byte) 255;
@@ -84,14 +97,18 @@ public class SpotQuantifier3D {
 
         // --- 3. 3D connected-components labeling (32-bit labels) ---
         // 32-bit avoids the 65535 label cap when many noise CCs are present above threshold.
+        checkCancelled(shouldCancel);
         ImagePlus labelImp  = BinaryImages.componentsLabeling(binaryImp, params.connectivity, 32);
         ImageStack labelStack = labelImp.getStack();
+        checkCancelled(shouldCancel);
 
         // --- 4. Count voxels per label ---
         Map<Integer, Long> voxelCounts = new HashMap<>();
         for (int z = 1; z <= d; z++) {
+            checkCancelled(shouldCancel);
             ImageProcessor ip = labelStack.getProcessor(z);
             for (int y = 0; y < h; y++) {
+                checkCancelled(shouldCancel);
                 for (int x = 0; x < w; x++) {
                     int label = (int) Math.round(ip.getPixelValue(x, y));
                     if (label > 0) {
@@ -103,5 +120,11 @@ public class SpotQuantifier3D {
 
         ImagePlus labelImage = new ImagePlus(blurred.getShortTitle() + "-cc", labelStack);
         return new CcResult3D(labelImage, voxelCounts);
+    }
+
+    private static void checkCancelled(BooleanSupplier shouldCancel) {
+        if (shouldCancel != null && shouldCancel.getAsBoolean()) {
+            throw new CancellationException();
+        }
     }
 }

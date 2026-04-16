@@ -10,6 +10,8 @@ import jp.yourorg.fiji_maxima_based_segmenter.core.MarkerResult3D;
 
 import java.util.HashMap;
 import java.util.Map;
+import java.util.concurrent.CancellationException;
+import java.util.function.BooleanSupplier;
 import java.util.function.Consumer;
 
 /**
@@ -65,7 +67,7 @@ public class SeededQuantifier3D {
                                        QuantifierParams params,
                                        double voxelVol,
                                        boolean areaEnabled) {
-        return compute(imp, areaThreshold, seedThreshold, params, voxelVol, areaEnabled, null);
+        return compute(imp, areaThreshold, seedThreshold, params, voxelVol, areaEnabled, null, null);
     }
 
     public static SeededResult compute(ImagePlus imp,
@@ -75,6 +77,17 @@ public class SeededQuantifier3D {
                                        double voxelVol,
                                        boolean areaEnabled,
                                        Consumer<String> progress) {
+        return compute(imp, areaThreshold, seedThreshold, params, voxelVol, areaEnabled, progress, null);
+    }
+
+    public static SeededResult compute(ImagePlus imp,
+                                       int areaThreshold,
+                                       int seedThreshold,
+                                       QuantifierParams params,
+                                       double voxelVol,
+                                       boolean areaEnabled,
+                                       Consumer<String> progress,
+                                       BooleanSupplier shouldCancel) {
         int w = imp.getWidth();
         int h = imp.getHeight();
         int d = imp.getNSlices();
@@ -83,16 +96,18 @@ public class SeededQuantifier3D {
         ImagePlus blurred = imp;
         if (params.gaussianBlur) {
             reportProgress(progress, "blurring");
+            checkCancelled(shouldCancel);
             blurred = imp.duplicate();
             blurred.setTitle(imp.getShortTitle() + "-blurred");
             IJ.run(blurred, "Gaussian Blur 3D...",
                 "x=" + params.gaussXY + " y=" + params.gaussXY + " z=" + params.gaussZ);
+            checkCancelled(shouldCancel);
         }
 
         try {
             // 2. Seed detection: CC at seedThreshold + size filter
             reportProgress(progress, "finding seed components");
-            CcResult3D seedCC = SpotQuantifier3D.computeCCFromBlurred(blurred, seedThreshold, params);
+            CcResult3D seedCC = SpotQuantifier3D.computeCCFromBlurred(blurred, seedThreshold, params, shouldCancel);
             if (seedCC.voxelCounts.isEmpty()) {
                 return null;
             }
@@ -102,6 +117,7 @@ public class SeededQuantifier3D {
             SegmentationResult3D rawSeedSeg = seedCC.buildFilteredResult(allValid);
 
             reportProgress(progress, "filtering seed components");
+            checkCancelled(shouldCancel);
             Map<Integer, Integer> seedStatus = seedCC.classifyLabels(params, voxelVol);
             SegmentationResult3D filteredSeeds = seedCC.buildFilteredResult(seedStatus);
 
@@ -124,10 +140,12 @@ public class SeededQuantifier3D {
             ImageStack blurredStack = blurred.getStack();
             ImageStack domainStack  = new ImageStack(w, h);
             for (int z = 1; z <= d; z++) {
+                checkCancelled(shouldCancel);
                 ImageProcessor ip = blurredStack.getProcessor(z);
                 ByteProcessor bp  = new ByteProcessor(w, h);
                 byte[] bpix = (byte[]) bp.getPixels();
                 for (int y = 0; y < h; y++) {
+                    checkCancelled(shouldCancel);
                     for (int x = 0; x < w; x++) {
                         if (ip.get(x, y) >= areaThreshold) {
                             bpix[y * w + x] = (byte) 255;
@@ -138,9 +156,11 @@ public class SeededQuantifier3D {
             }
             if (params.fillHoles) {
                 reportProgress(progress, "filling mask holes");
+                checkCancelled(shouldCancel);
                 ImagePlus domainImp = new ImagePlus("domain", domainStack);
                 IJ.run(domainImp, "Fill Holes", "stack");
                 domainStack = domainImp.getStack();
+                checkCancelled(shouldCancel);
             }
 
             // 5. Seeded watershed: expand seeds within domain
@@ -148,7 +168,7 @@ public class SeededQuantifier3D {
             ImageStack seedLabelStack = filteredSeeds.labelImage.getStack();
             Connectivity conn = Connectivity.fromInt(params.connectivity);
             MarkerResult3D markers = new MarkerResult3D(seedLabelStack, domainStack, seedCount);
-            SegmentationResult3D watershedResult = new Watershed3DRunner().run(blurred, markers, conn);
+            SegmentationResult3D watershedResult = new Watershed3DRunner().run(blurred, markers, conn, shouldCancel);
             return new SeededResult(rawSeedSeg, filteredSeeds, watershedResult);
 
         } finally {
@@ -160,5 +180,11 @@ public class SeededQuantifier3D {
 
     private static void reportProgress(Consumer<String> progress, String message) {
         if (progress != null) progress.accept(message);
+    }
+
+    private static void checkCancelled(BooleanSupplier shouldCancel) {
+        if (shouldCancel != null && shouldCancel.getAsBoolean()) {
+            throw new CancellationException();
+        }
     }
 }

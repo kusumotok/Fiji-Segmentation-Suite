@@ -29,6 +29,8 @@ import java.util.Map;
 import java.util.Timer;
 import java.util.TimerTask;
 import java.util.TreeSet;
+import java.util.concurrent.CancellationException;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Consumer;
 import javax.swing.BorderFactory;
@@ -98,6 +100,7 @@ public class SeededSpotQuantifier3DFrame extends PlugInFrame {
 
     private final Button applyBtn   = new Button("Apply");
     private final Button saveAllBtn = new Button("Save");
+    private final Button cancelBtn  = new Button("Cancel");
     private final Button batchBtn   = new Button("Batch\u2026");
 
     // --- Save section ---
@@ -149,6 +152,7 @@ public class SeededSpotQuantifier3DFrame extends PlugInFrame {
 
     private final Timer previewTimer = new Timer("ssq3d-preview", true);
     private TimerTask   previewTask;
+    private final AtomicBoolean cancelRequested = new AtomicBoolean(false);
     private final AtomicInteger previewGen = new AtomicInteger();
     private final Timer zWatchTimer = new Timer("ssq3d-zwatch", true);
     private int lastZ = -1;
@@ -157,6 +161,8 @@ public class SeededSpotQuantifier3DFrame extends PlugInFrame {
     private boolean ownsProcessingImage = false;
     private boolean zProjSelectionManual = false;
     private boolean updatingZProjChoice = false;
+    private boolean operationRunning = false;
+    private SwingWorker<?, ?> activeWorker;
 
     public SeededSpotQuantifier3DFrame(ImagePlus imp) {
         super("Seeded Spot Quantifier 3D");
@@ -273,6 +279,7 @@ public class SeededSpotQuantifier3DFrame extends PlugInFrame {
         buttons.add(applyBtn);
         buttons.add(saveAllBtn);
         buttons.add(saveToExecBtn);
+        buttons.add(cancelBtn);
         buttons.add(batchBtn);
         add(buttons, BorderLayout.SOUTH);
     }
@@ -655,9 +662,11 @@ public class SeededSpotQuantifier3DFrame extends PlugInFrame {
         saveParamCheck.setEnabled(hasTarget);
         customFolderCheck.setEnabled(hasTarget);
         folderNameField.setEnabled(hasTarget && customFolderCheck.getState());
-        saveToExecBtn.setEnabled(hasTarget);
-        applyBtn.setEnabled(hasTarget);
-        saveAllBtn.setEnabled(hasTarget);
+        saveToExecBtn.setEnabled(hasTarget && !operationRunning);
+        applyBtn.setEnabled(hasTarget && !operationRunning);
+        saveAllBtn.setEnabled(hasTarget && !operationRunning);
+        batchBtn.setEnabled(hasTarget && !operationRunning);
+        cancelBtn.setEnabled(operationRunning);
     }
 
     // =========================================================
@@ -694,9 +703,10 @@ public class SeededSpotQuantifier3DFrame extends PlugInFrame {
         areaThreshBar.addAdjustmentListener(e -> {
             if (syncing) return;
             int prevBg = areaThreshold;
-            areaThreshold = areaThreshBar.getValue();
+            areaThreshold = Math.min(areaThreshBar.getValue(), seedThreshold);
             model.setTBg(areaThreshold);
             syncing = true;
+            areaThreshBar.setValue(areaThreshold);
             areaThreshField.setText(Integer.toString(areaThreshold));
             histogramPanel.repaintThresholdMarkers(prevBg, model.getTFg());
             syncing = false;
@@ -710,9 +720,10 @@ public class SeededSpotQuantifier3DFrame extends PlugInFrame {
         seedThreshBar.addAdjustmentListener(e -> {
             if (syncing) return;
             int prevFg = seedThreshold;
-            seedThreshold = seedThreshBar.getValue();
+            seedThreshold = Math.max(seedThreshBar.getValue(), areaThreshold);
             model.setTFg(seedThreshold);
             syncing = true;
+            seedThreshBar.setValue(seedThreshold);
             seedThreshField.setText(Integer.toString(seedThreshold));
             histogramPanel.repaintThresholdMarkers(model.getTBg(), prevFg);
             syncing = false;
@@ -788,6 +799,7 @@ public class SeededSpotQuantifier3DFrame extends PlugInFrame {
         saveToggleBtn.addActionListener(e -> toggleSaveSection());
         customFolderCheck.addItemListener(e -> updateTargetAvailability());
         saveToExecBtn.addActionListener(e -> runSaveTo());
+        cancelBtn.addActionListener(e -> cancelCurrentOperation());
 
         applyBtn  .addActionListener(e -> runApply());
         saveAllBtn.addActionListener(e -> runSaveAll());
@@ -862,8 +874,8 @@ public class SeededSpotQuantifier3DFrame extends PlugInFrame {
         if (syncing) return;
         int prevBg = areaThreshold;
         int prevFg = seedThreshold;
-        areaThreshold = tBg;
-        seedThreshold = tFg;
+        areaThreshold = Math.min(tBg, tFg);
+        seedThreshold = Math.max(tBg, tFg);
         model.setTBg(areaThreshold);
         model.setTFg(seedThreshold);
         syncing = true;
@@ -926,7 +938,7 @@ public class SeededSpotQuantifier3DFrame extends PlugInFrame {
         int prevBg = areaThreshold;
         int v = parseIntOr(areaThreshField.getText(), areaThreshold);
         v = Math.max(0, v);
-        areaThreshold = v;
+        areaThreshold = Math.min(v, seedThreshold);
         model.setTBg(areaThreshold);
         syncing = true;
         areaThreshBar.setValue(areaThreshold);
@@ -941,7 +953,7 @@ public class SeededSpotQuantifier3DFrame extends PlugInFrame {
         int prevFg = seedThreshold;
         int v = parseIntOr(seedThreshField.getText(), seedThreshold);
         v = Math.max(0, v);
-        seedThreshold = v;
+        seedThreshold = Math.max(v, areaThreshold);
         model.setTFg(seedThreshold);
         syncing = true;
         seedThreshBar.setValue(seedThreshold);
@@ -1306,14 +1318,10 @@ public class SeededSpotQuantifier3DFrame extends PlugInFrame {
         if (segCacheKey != null && segCacheKey.equals(key) && cachedSeededResult != null) {
             return cachedSeededResult;
         }
-        try {
-            cachedSeededResult = SeededQuantifier3D.compute(imp, at, st, params, voxelVol, areaEn, progress);
-            segCacheKey        = key;
-            return cachedSeededResult;
-        } catch (Exception ex) {
-            IJ.log("Seeded Spot Quantifier 3D preview error: " + ex.getMessage());
-            return null;
-        }
+        cachedSeededResult = SeededQuantifier3D.compute(
+            imp, at, st, params, voxelVol, areaEn, progress, () -> cancelRequested.get());
+        segCacheKey        = key;
+        return cachedSeededResult;
     }
 
     private String segKey(QuantifierParams p, int at, int st, boolean areaEn) {
@@ -1331,6 +1339,7 @@ public class SeededSpotQuantifier3DFrame extends PlugInFrame {
             return;
         }
         if (previewOff.getState()) return;
+        beginOperation();
         setStatusText("Computing...");
         boolean roiMode = previewRoi.getState();
         int gen = previewGen.incrementAndGet();
@@ -1342,25 +1351,41 @@ public class SeededSpotQuantifier3DFrame extends PlugInFrame {
         boolean areaEn = areaEnabled;
         previewTask = new TimerTask() {
             @Override public void run() {
-                SeededQuantifier3D.SeededResult r = getOrComputeSeeded(params, at, st, areaEn,
-                    stage -> EventQueue.invokeLater(() -> {
+                try {
+                    SeededQuantifier3D.SeededResult r = getOrComputeSeeded(params, at, st, areaEn,
+                        stage -> EventQueue.invokeLater(() -> {
+                            if (previewGen.get() != gen) return;
+                            setStatusText("Applying: " + stage + "...");
+                        }));
+                    if (r == null || previewGen.get() != gen) {
+                        EventQueue.invokeLater(() -> {
+                            setStatusText(cancelRequested.get() ? "Cancelled." : "No spots found.");
+                            endOperation();
+                        });
+                        return;
+                    }
+                    int nSpots = countLabels(r.finalSeg);
+                    String msg = nSpots + " spot" + (nSpots != 1 ? "s" : "");
+                    IJ.showStatus("Seeded Spot Quantifier 3D: " + msg);
+                    EventQueue.invokeLater(() -> {
                         if (previewGen.get() != gen) return;
-                        setStatusText("Applying: " + stage + "...");
-                    }));
-                if (r == null || previewGen.get() != gen) {
-                    EventQueue.invokeLater(() -> setStatusText("No spots found."));
-                    return;
+                        setStatusText("Applying: rendering overlay...");
+                        if (roiMode) renderRoiOverlay(r.seedSeg, r.finalSeg, areaEn, zPlane);
+                        else         renderOverlay(r.seedSeg, r.finalSeg, areaEn, zPlane);
+                        setStatusText(msg);
+                        endOperation();
+                    });
+                } catch (CancellationException ex) {
+                    EventQueue.invokeLater(() -> {
+                        setStatusText("Cancelled.");
+                        endOperation();
+                    });
+                } catch (Exception ex) {
+                    EventQueue.invokeLater(() -> {
+                        setStatusText("Apply failed: " + ex.getMessage());
+                        endOperation();
+                    });
                 }
-                int nSpots = countLabels(r.finalSeg);
-                String msg = nSpots + " spot" + (nSpots != 1 ? "s" : "");
-                IJ.showStatus("Seeded Spot Quantifier 3D: " + msg);
-                EventQueue.invokeLater(() -> {
-                    if (previewGen.get() != gen) return;
-                    setStatusText("Applying: rendering overlay...");
-                    if (roiMode) renderRoiOverlay(r.seedSeg, r.finalSeg, areaEn, zPlane);
-                    else         renderOverlay(r.seedSeg, r.finalSeg, areaEn, zPlane);
-                    setStatusText(msg);
-                });
             }
         };
         previewTimer.schedule(previewTask, 0);
@@ -1406,21 +1431,18 @@ public class SeededSpotQuantifier3DFrame extends PlugInFrame {
         boolean saveParam = saveParamCheck.getState();
         Color roiColor = selectedRoiColor();
 
-        applyBtn.setEnabled(false);
-        saveAllBtn.setEnabled(false);
-        saveToExecBtn.setEnabled(false);
-        batchBtn.setEnabled(false);
+        beginOperation();
         setCursor(Cursor.getPredefinedCursor(Cursor.WAIT_CURSOR));
         setStatusText("Saving: preparing...");
 
-        new SwingWorker<String, String>() {
+        activeWorker = new SwingWorker<String, String>() {
             @Override
             protected String doInBackground() {
                 return SeededSpotQuantifier3DSaveSupport.saveOneToDir(
                     imp, rawImp != null ? rawImp : imp, selectedCh,
                     areaThreshold, seedThreshold, areaEnabled, params, outDir,
                     saveSeedRoi, saveSizeRoi, saveAreaRoi, saveResultRoi, saveCsv, saveParam, roiColor,
-                    msg -> publish(msg));
+                    msg -> publish(msg), () -> isCancelled() || cancelRequested.get());
             }
 
             @Override
@@ -1430,30 +1452,55 @@ public class SeededSpotQuantifier3DFrame extends PlugInFrame {
 
             @Override
             protected void done() {
-                applyBtn.setEnabled(true);
-                saveAllBtn.setEnabled(true);
-                saveToExecBtn.setEnabled(true);
-                batchBtn.setEnabled(true);
                 setCursor(Cursor.getDefaultCursor());
                 try {
                     String err = get();
-                    if (err == null) {
+                    if (SeededSpotQuantifier3DSaveSupport.CANCELLED.equals(err)) {
+                        setStatusText("Cancelled.");
+                    } else if (err == null) {
                         setStatusText("Saved to " + outDir.getName());
                         IJ.showMessage("Saved", "Saved to:\n" + outDir.getAbsolutePath());
                     } else {
                         setStatusText("Save failed: " + err);
                         IJ.error("Seeded Spot Quantifier 3D", "Save failed: " + err);
                     }
+                } catch (CancellationException ex) {
+                    setStatusText("Cancelled.");
                 } catch (Exception ex) {
                     setStatusText("Save failed: " + ex.getMessage());
                     IJ.error("Seeded Spot Quantifier 3D", "Save failed: " + ex.getMessage());
+                } finally {
+                    activeWorker = null;
+                    endOperation();
                 }
             }
-        }.execute();
+        };
+        activeWorker.execute();
     }
 
     private void runBatch() {
         new BatchDialog().setVisible(true);
+    }
+
+    private void beginOperation() {
+        cancelRequested.set(false);
+        operationRunning = true;
+        updateTargetAvailability();
+    }
+
+    private void endOperation() {
+        operationRunning = false;
+        cancelRequested.set(false);
+        updateTargetAvailability();
+    }
+
+    private void cancelCurrentOperation() {
+        if (!operationRunning) return;
+        cancelRequested.set(true);
+        setStatusText("Cancelling...");
+        previewGen.incrementAndGet();
+        cancelPreviewTask();
+        if (activeWorker != null) activeWorker.cancel(true);
     }
 
     // =========================================================

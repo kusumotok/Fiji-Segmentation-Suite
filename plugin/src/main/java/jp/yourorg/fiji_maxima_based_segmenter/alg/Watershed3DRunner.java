@@ -8,6 +8,9 @@ import inra.ijpb.watershed.Watershed;
 import jp.yourorg.fiji_maxima_based_segmenter.core.Connectivity;
 import jp.yourorg.fiji_maxima_based_segmenter.core.MarkerResult3D;
 
+import java.util.concurrent.CancellationException;
+import java.util.function.BooleanSupplier;
+
 public class Watershed3DRunner {
 
     /**
@@ -19,15 +22,21 @@ public class Watershed3DRunner {
      */
     public SegmentationResult3D run(ImagePlus imp, MarkerResult3D markers,
                                      Connectivity connectivity) {
+        return run(imp, markers, connectivity, null);
+    }
+
+    public SegmentationResult3D run(ImagePlus imp, MarkerResult3D markers,
+                                     Connectivity connectivity, BooleanSupplier shouldCancel) {
         ImageStack inputStack = imp.getStack();
         ImageStack markerStack = markers.getSeedLabels();
         ImageStack domainStack = markers.getDomainMask();
         int conn3d = connectivity.to3D();
 
         // Invert intensity for watershed surface (find basins at bright areas)
-        ImageStack invertedStack = invertIntensity(inputStack);
+        ImageStack invertedStack = invertIntensity(inputStack, shouldCancel);
 
         // Run MorphoLibJ marker-controlled watershed
+        checkCancelled(shouldCancel);
         ImageStack labelStack = Watershed.computeWatershed(
             invertedStack,
             markerStack,
@@ -35,6 +44,7 @@ public class Watershed3DRunner {
             conn3d,
             false  // getDams=false: fill entire domain without treating background as implicit seed
         );
+        checkCancelled(shouldCancel);
 
         ImagePlus labelImage = new ImagePlus(
             imp.getShortTitle() + "-labels-3D",
@@ -44,7 +54,7 @@ public class Watershed3DRunner {
         return new SegmentationResult3D(labelImage);
     }
 
-    private ImageStack invertIntensity(ImageStack stack) {
+    private ImageStack invertIntensity(ImageStack stack, BooleanSupplier shouldCancel) {
         int w = stack.getWidth();
         int h = stack.getHeight();
         int d = stack.getSize();
@@ -53,8 +63,10 @@ public class Watershed3DRunner {
         float globalMin = Float.MAX_VALUE;
         float globalMax = -Float.MAX_VALUE;
         for (int z = 1; z <= d; z++) {
+            checkCancelled(shouldCancel);
             ImageProcessor ip = stack.getProcessor(z);
             for (int y = 0; y < h; y++) {
+                checkCancelled(shouldCancel);
                 for (int x = 0; x < w; x++) {
                     float v = ip.getf(x, y);
                     if (v < globalMin) globalMin = v;
@@ -66,9 +78,11 @@ public class Watershed3DRunner {
         float sum = globalMin + globalMax;
         ImageStack inverted = new ImageStack(w, h);
         for (int z = 1; z <= d; z++) {
+            checkCancelled(shouldCancel);
             ImageProcessor ip = stack.getProcessor(z);
             FloatProcessor fp = new FloatProcessor(w, h);
             for (int y = 0; y < h; y++) {
+                checkCancelled(shouldCancel);
                 for (int x = 0; x < w; x++) {
                     fp.setf(x, y, sum - ip.getf(x, y));
                 }
@@ -76,5 +90,11 @@ public class Watershed3DRunner {
             inverted.addSlice(fp);
         }
         return inverted;
+    }
+
+    private static void checkCancelled(BooleanSupplier shouldCancel) {
+        if (shouldCancel != null && shouldCancel.getAsBoolean()) {
+            throw new CancellationException();
+        }
     }
 }

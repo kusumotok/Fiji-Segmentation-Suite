@@ -23,9 +23,13 @@ import java.time.format.DateTimeFormatter;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CancellationException;
+import java.util.function.BooleanSupplier;
 import java.util.function.Consumer;
 
 public final class SeededSpotQuantifier3DSaveSupport {
+    public static final String CANCELLED = "__cancelled__";
+
     private SeededSpotQuantifier3DSaveSupport() {}
 
     public static File resolveOutputDir(Frame parent, ImagePlus target, boolean customFolder, String pattern,
@@ -84,6 +88,19 @@ public final class SeededSpotQuantifier3DSaveSupport {
                                       boolean saveCsv, boolean saveParam,
                                       Color roiColor,
                                       Consumer<String> progress) {
+        return saveOneToDir(target, roiPositionSource, roiChannel, at, st, areaEn, params, outDir,
+            saveSeedRoi, saveSizeRoi, saveAreaRoi, saveResultRoi, saveCsv, saveParam, roiColor, progress, null);
+    }
+
+    public static String saveOneToDir(ImagePlus target, ImagePlus roiPositionSource, int roiChannel,
+                                      int at, int st, boolean areaEn,
+                                      QuantifierParams params, File outDir,
+                                      boolean saveSeedRoi, boolean saveSizeRoi,
+                                      boolean saveAreaRoi, boolean saveResultRoi,
+                                      boolean saveCsv, boolean saveParam,
+                                      Color roiColor,
+                                      Consumer<String> progress,
+                                      BooleanSupplier shouldCancel) {
         Calibration cal = target.getCalibration();
         double tw = cal.pixelWidth  > 0 ? cal.pixelWidth  : 1;
         double th = cal.pixelHeight > 0 ? cal.pixelHeight : 1;
@@ -92,41 +109,48 @@ public final class SeededSpotQuantifier3DSaveSupport {
 
         reportProgress(progress, "Saving: segmenting...");
         SeededQuantifier3D.SeededResult r = SeededQuantifier3D.compute(
-            target, at, st, params, tVoxelVol, areaEn);
+            target, at, st, params, tVoxelVol, areaEn, null, shouldCancel);
         if (r == null) return "no spots detected";
 
         String basename = saveBaseName(roiPositionSource != null ? roiPositionSource : target);
 
         try {
+            checkCancelled(shouldCancel);
             outDir.mkdirs();
 
             if (saveCsv) {
+                checkCancelled(shouldCancel);
+                reportProgress(progress, "Saving: measuring...");
+                List<SpotMeasurement> spots = SpotMeasurer.measure(r.finalSeg, target, tw, th, td, shouldCancel);
                 reportProgress(progress, "Saving: writing CSV...");
-                List<SpotMeasurement> spots = SpotMeasurer.measure(r.finalSeg, target, tw, th, td);
                 CsvExporter.writeCsv(spots, new File(outDir, basename + "_spots.csv"));
             }
 
             if (saveParam) {
+                checkCancelled(shouldCancel);
                 reportProgress(progress, "Saving: writing params...");
                 CsvExporter.writeSeededParams(at, st, params,
                     new File(outDir, basename + "_params.txt"));
             }
 
             if (saveSeedRoi && r.rawSeedSeg != null) {
+                checkCancelled(shouldCancel);
                 reportProgress(progress, "Saving: writing seed ROI...");
                 saveRoiToZip(r.rawSeedSeg, roiColor, roiPositionSource, roiChannel, new File(outDir, basename + "_seed_roi.zip"));
             }
 
             if (saveSizeRoi && r.seedSeg != null) {
+                checkCancelled(shouldCancel);
                 reportProgress(progress, "Saving: writing size ROI...");
                 saveRoiToZip(r.seedSeg, roiColor, roiPositionSource, roiChannel, new File(outDir, basename + "_size_roi.zip"));
             }
 
             if (saveAreaRoi) {
+                checkCancelled(shouldCancel);
                 reportProgress(progress, "Saving: writing area ROI...");
                 QuantifierParams noFilter = new QuantifierParams(
                     at, null, null, false, 1.0, 0.5, params.connectivity, params.fillHoles);
-                CcResult3D areaCC = SpotQuantifier3D.computeCCFromBlurred(target, at, noFilter);
+                CcResult3D areaCC = SpotQuantifier3D.computeCCFromBlurred(target, at, noFilter, shouldCancel);
                 Map<Integer, Integer> allValidMap = new HashMap<>();
                 areaCC.voxelCounts.keySet().forEach(k -> allValidMap.put(k, CcResult3D.STATUS_VALID));
                 SegmentationResult3D areaSeg = areaCC.buildFilteredResult(allValidMap);
@@ -134,11 +158,14 @@ public final class SeededSpotQuantifier3DSaveSupport {
             }
 
             if (saveResultRoi && r.finalSeg != null) {
+                checkCancelled(shouldCancel);
                 reportProgress(progress, "Saving: writing result ROI...");
                 saveRoiToZip(r.finalSeg, roiColor, roiPositionSource, roiChannel, new File(outDir, basename + "_result_roi.zip"));
             }
 
             return null;
+        } catch (CancellationException ex) {
+            return CANCELLED;
         } catch (Exception ex) {
             return ex.getMessage();
         }
@@ -158,6 +185,12 @@ public final class SeededSpotQuantifier3DSaveSupport {
 
     private static void reportProgress(Consumer<String> progress, String message) {
         if (progress != null) progress.accept(message);
+    }
+
+    private static void checkCancelled(BooleanSupplier shouldCancel) {
+        if (shouldCancel != null && shouldCancel.getAsBoolean()) {
+            throw new CancellationException();
+        }
     }
 
     private static String stripTiffExtension(String name) {

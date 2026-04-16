@@ -8,6 +8,8 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CancellationException;
+import java.util.function.BooleanSupplier;
 
 /**
  * Measures 3D spot statistics by scanning the label image once (O(W×H×D)).
@@ -30,6 +32,12 @@ public class SpotMeasurer {
      */
     public static List<SpotMeasurement> measure(SegmentationResult3D seg, ImagePlus origImp,
                                                  double vw, double vh, double vd) {
+        return measure(seg, origImp, vw, vh, vd, null);
+    }
+
+    public static List<SpotMeasurement> measure(SegmentationResult3D seg, ImagePlus origImp,
+                                                 double vw, double vh, double vd,
+                                                 BooleanSupplier shouldCancel) {
         ImageStack labelStack = seg.labelImage.getStack();
         ImageStack origStack  = origImp.getStack();
         int w = labelStack.getWidth();
@@ -49,9 +57,11 @@ public class SpotMeasurer {
         double xyFace = vw * vh;
 
         for (int z = 1; z <= d; z++) {
+            checkCancelled(shouldCancel);
             ImageProcessor labelIp = labelStack.getProcessor(z);
             ImageProcessor origIp  = origStack.getProcessor(z);
             for (int y = 0; y < h; y++) {
+                checkCancelled(shouldCancel);
                 for (int x = 0; x < w; x++) {
                     int label = (int) Math.round(labelIp.getPixelValue(x, y));
                     if (label <= 0) continue;
@@ -82,6 +92,7 @@ public class SpotMeasurer {
         List<SpotMeasurement> result = new ArrayList<>();
 
         for (int label : new java.util.TreeSet<>(voxCount.keySet())) {
+            checkCancelled(shouldCancel);
             long   nVox    = voxCount.get(label)[0];
             double volume  = nVox * voxelVol;
             double totalI  = intDen.get(label)[0];
@@ -108,5 +119,11 @@ public class SpotMeasurer {
             ));
         }
         return result;
+    }
+
+    private static void checkCancelled(BooleanSupplier shouldCancel) {
+        if (shouldCancel != null && shouldCancel.getAsBoolean()) {
+            throw new CancellationException();
+        }
     }
 }
