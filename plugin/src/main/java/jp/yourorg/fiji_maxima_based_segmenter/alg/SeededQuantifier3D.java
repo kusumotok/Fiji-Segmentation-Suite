@@ -5,6 +5,7 @@ import ij.ImagePlus;
 import ij.ImageStack;
 import ij.process.ByteProcessor;
 import ij.process.ImageProcessor;
+import inra.ijpb.binary.BinaryImages;
 import jp.yourorg.fiji_maxima_based_segmenter.core.Connectivity;
 import jp.yourorg.fiji_maxima_based_segmenter.core.MarkerResult3D;
 
@@ -154,22 +155,48 @@ public class SeededQuantifier3D {
                 }
                 domainStack.addSlice(bp);
             }
+            ImagePlus domainImp = new ImagePlus("domain", domainStack);
             if (params.fillHoles) {
                 reportProgress(progress, "filling mask holes");
                 checkCancelled(shouldCancel);
-                ImagePlus domainImp = new ImagePlus("domain", domainStack);
                 IJ.run(domainImp, "Fill Holes", "stack");
                 domainStack = domainImp.getStack();
                 checkCancelled(shouldCancel);
             }
 
-            // 5. Seeded watershed: expand seeds within domain
-            reportProgress(progress, "running watershed");
-            ImageStack seedLabelStack = filteredSeeds.labelImage.getStack();
+            reportProgress(progress, "building area components");
+            checkCancelled(shouldCancel);
+            ImagePlus areaLabelImp = BinaryImages.componentsLabeling(domainImp, params.connectivity, 32);
+            ImageStack areaLabelStack = areaLabelImp.getStack();
+
+            AreaPartition partition = partitionAreas(filteredSeeds.labelImage.getStack(), areaLabelStack, shouldCancel);
+
+            reportProgress(progress, "assigning single-seed areas");
+            ImageStack finalLabelStack = createEmptyLabelStack(filteredSeeds.labelImage.getStack());
+            int ambiguousAreaCount = populateShortcutAndAmbiguousMasks(
+                areaLabelStack,
+                filteredSeeds.labelImage.getStack(),
+                partition,
+                finalLabelStack,
+                shouldCancel);
+
+            if (ambiguousAreaCount == 0) {
+                reportProgress(progress, "watershed skipped");
+                return new SeededResult(rawSeedSeg, filteredSeeds,
+                    new SegmentationResult3D(new ImagePlus(imp.getShortTitle() + "-labels-3D", finalLabelStack)));
+            }
+
+            // 5. Seeded watershed: expand seeds only within ambiguous domains
+            reportProgress(progress, "running watershed on ambiguous areas");
             Connectivity conn = Connectivity.fromInt(params.connectivity);
-            MarkerResult3D markers = new MarkerResult3D(seedLabelStack, domainStack, seedCount);
+            MarkerResult3D markers = new MarkerResult3D(
+                partition.ambiguousSeedStack,
+                partition.ambiguousDomainStack,
+                partition.ambiguousSeedCount);
             SegmentationResult3D watershedResult = new Watershed3DRunner().run(blurred, markers, conn, shouldCancel);
-            return new SeededResult(rawSeedSeg, filteredSeeds, watershedResult);
+            mergeLabels(finalLabelStack, watershedResult.labelImage.getStack(), shouldCancel);
+            return new SeededResult(rawSeedSeg, filteredSeeds,
+                new SegmentationResult3D(new ImagePlus(imp.getShortTitle() + "-labels-3D", finalLabelStack)));
 
         } finally {
             if (params.gaussianBlur && blurred != imp) {
@@ -185,6 +212,179 @@ public class SeededQuantifier3D {
     private static void checkCancelled(BooleanSupplier shouldCancel) {
         if (shouldCancel != null && shouldCancel.getAsBoolean()) {
             throw new CancellationException();
+        }
+    }
+
+    private static AreaPartition partitionAreas(ImageStack seedLabelStack,
+                                                ImageStack areaLabelStack,
+                                                BooleanSupplier shouldCancel) {
+        int w = seedLabelStack.getWidth();
+        int h = seedLabelStack.getHeight();
+        int d = seedLabelStack.getSize();
+
+        Map<Integer, Integer> seedAreaBySeedLabel = new HashMap<>();
+        for (int z = 1; z <= d; z++) {
+            checkCancelled(shouldCancel);
+            ImageProcessor seedIp = seedLabelStack.getProcessor(z);
+            ImageProcessor areaIp = areaLabelStack.getProcessor(z);
+            for (int y = 0; y < h; y++) {
+                checkCancelled(shouldCancel);
+                for (int x = 0; x < w; x++) {
+                    int seedLabel = (int) Math.round(seedIp.getPixelValue(x, y));
+                    if (seedLabel <= 0) continue;
+                    int areaLabel = (int) Math.round(areaIp.getPixelValue(x, y));
+                    if (areaLabel <= 0) continue;
+                    Integer prevArea = seedAreaBySeedLabel.putIfAbsent(seedLabel, areaLabel);
+                    if (prevArea != null && prevArea != areaLabel) {
+                        throw new IllegalStateException("Seed label spans multiple area components.");
+                    }
+                }
+            }
+        }
+
+        Map<Integer, Integer> areaSeedCount = new HashMap<>();
+        Map<Integer, Integer> singleSeedLabelByArea = new HashMap<>();
+        for (Map.Entry<Integer, Integer> entry : seedAreaBySeedLabel.entrySet()) {
+            int seedLabel = entry.getKey();
+            int areaLabel = entry.getValue();
+            int count = areaSeedCount.getOrDefault(areaLabel, 0) + 1;
+            areaSeedCount.put(areaLabel, count);
+            if (count == 1) {
+                singleSeedLabelByArea.put(areaLabel, seedLabel);
+            } else {
+                singleSeedLabelByArea.remove(areaLabel);
+            }
+        }
+
+        ImageStack ambiguousDomainStack = new ImageStack(w, h);
+        ImageStack ambiguousSeedStack = createEmptyLabelStack(seedLabelStack);
+        return new AreaPartition(areaSeedCount, singleSeedLabelByArea, ambiguousDomainStack, ambiguousSeedStack);
+    }
+
+    private static int populateShortcutAndAmbiguousMasks(ImageStack areaLabelStack,
+                                                         ImageStack seedLabelStack,
+                                                         AreaPartition partition,
+                                                         ImageStack finalLabelStack,
+                                                         BooleanSupplier shouldCancel) {
+        int w = areaLabelStack.getWidth();
+        int h = areaLabelStack.getHeight();
+        int d = areaLabelStack.getSize();
+        int ambiguousAreaCount = 0;
+        Map<Integer, Boolean> ambiguousSeen = new HashMap<>();
+
+        for (int z = 1; z <= d; z++) {
+            checkCancelled(shouldCancel);
+            ImageProcessor areaIp = areaLabelStack.getProcessor(z);
+            ImageProcessor outIp = finalLabelStack.getProcessor(z);
+            ByteProcessor ambiguousDomainIp = new ByteProcessor(w, h);
+            ImageProcessor ambiguousSeedIp = partition.ambiguousSeedStack.getProcessor(z);
+            byte[] ambiguousDomainPixels = (byte[]) ambiguousDomainIp.getPixels();
+
+            for (int y = 0; y < h; y++) {
+                checkCancelled(shouldCancel);
+                for (int x = 0; x < w; x++) {
+                    int areaLabel = (int) Math.round(areaIp.getPixelValue(x, y));
+                    if (areaLabel <= 0) continue;
+
+                    int seedCount = partition.areaSeedCount.getOrDefault(areaLabel, 0);
+                    if (seedCount == 1) {
+                        int seedLabel = partition.singleSeedLabelByArea.get(areaLabel);
+                        outIp.putPixelValue(x, y, seedLabel);
+                    } else if (seedCount > 1) {
+                        ambiguousDomainPixels[y * w + x] = (byte) 255;
+                        if (!ambiguousSeen.containsKey(areaLabel)) {
+                            ambiguousSeen.put(areaLabel, Boolean.TRUE);
+                            ambiguousAreaCount++;
+                        }
+                    }
+                }
+            }
+
+            ambiguousSeedIp = partition.ambiguousSeedStack.getProcessor(z);
+            ImageProcessor sourceSeedIp = seedLabelStack.getProcessor(z);
+            for (int y = 0; y < h; y++) {
+                checkCancelled(shouldCancel);
+                for (int x = 0; x < w; x++) {
+                    if (ambiguousDomainPixels[y * w + x] == 0) continue;
+                    int seedLabel = (int) Math.round(sourceSeedIp.getPixelValue(x, y));
+                    if (seedLabel > 0) {
+                        ambiguousSeedIp.putPixelValue(x, y, seedLabel);
+                    }
+                }
+            }
+
+            partition.ambiguousDomainStack.addSlice(ambiguousDomainIp);
+        }
+
+        partition.ambiguousSeedCount = countDistinctLabels(partition.ambiguousSeedStack, shouldCancel);
+        return ambiguousAreaCount;
+    }
+
+    private static void mergeLabels(ImageStack dst, ImageStack src, BooleanSupplier shouldCancel) {
+        int w = dst.getWidth();
+        int h = dst.getHeight();
+        int d = dst.getSize();
+        for (int z = 1; z <= d; z++) {
+            checkCancelled(shouldCancel);
+            ImageProcessor dstIp = dst.getProcessor(z);
+            ImageProcessor srcIp = src.getProcessor(z);
+            for (int y = 0; y < h; y++) {
+                checkCancelled(shouldCancel);
+                for (int x = 0; x < w; x++) {
+                    int label = (int) Math.round(srcIp.getPixelValue(x, y));
+                    if (label > 0) {
+                        dstIp.putPixelValue(x, y, label);
+                    }
+                }
+            }
+        }
+    }
+
+    private static ImageStack createEmptyLabelStack(ImageStack like) {
+        int w = like.getWidth();
+        int h = like.getHeight();
+        int d = like.getSize();
+        ImageStack out = new ImageStack(w, h);
+        for (int z = 1; z <= d; z++) {
+            out.addSlice(like.getProcessor(z).createProcessor(w, h));
+        }
+        return out;
+    }
+
+    private static int countDistinctLabels(ImageStack stack, BooleanSupplier shouldCancel) {
+        Map<Integer, Boolean> labels = new HashMap<>();
+        int w = stack.getWidth();
+        int h = stack.getHeight();
+        int d = stack.getSize();
+        for (int z = 1; z <= d; z++) {
+            checkCancelled(shouldCancel);
+            ImageProcessor ip = stack.getProcessor(z);
+            for (int y = 0; y < h; y++) {
+                checkCancelled(shouldCancel);
+                for (int x = 0; x < w; x++) {
+                    int label = (int) Math.round(ip.getPixelValue(x, y));
+                    if (label > 0) labels.put(label, Boolean.TRUE);
+                }
+            }
+        }
+        return labels.size();
+    }
+
+    private static class AreaPartition {
+        final Map<Integer, Integer> areaSeedCount;
+        final Map<Integer, Integer> singleSeedLabelByArea;
+        final ImageStack ambiguousDomainStack;
+        final ImageStack ambiguousSeedStack;
+        int ambiguousSeedCount;
+
+        AreaPartition(Map<Integer, Integer> areaSeedCount,
+                      Map<Integer, Integer> singleSeedLabelByArea,
+                      ImageStack ambiguousDomainStack,
+                      ImageStack ambiguousSeedStack) {
+            this.areaSeedCount = areaSeedCount;
+            this.singleSeedLabelByArea = singleSeedLabelByArea;
+            this.ambiguousDomainStack = ambiguousDomainStack;
+            this.ambiguousSeedStack = ambiguousSeedStack;
         }
     }
 }
