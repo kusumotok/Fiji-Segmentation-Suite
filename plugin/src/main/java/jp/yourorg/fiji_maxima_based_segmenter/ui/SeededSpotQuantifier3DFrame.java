@@ -15,6 +15,7 @@ import ij.process.ColorProcessor;
 import ij.process.ImageProcessor;
 import jp.yourorg.fiji_maxima_based_segmenter.alg.*;
 import jp.yourorg.fiji_maxima_based_segmenter.core.ThresholdModel;
+import jp.yourorg.fiji_maxima_based_segmenter.util.SeededSpotQuantifier3DImageSupport;
 import jp.yourorg.fiji_maxima_based_segmenter.util.SeededSpotQuantifier3DSaveSupport;
 
 import java.awt.*;
@@ -168,8 +169,9 @@ public class SeededSpotQuantifier3DFrame extends PlugInFrame {
 
         model = ThresholdModel.createFor3DPlugin(this.imp);
 
-        int imgMin = model.getMinValue();
-        int imgMax = safeImgMax(imgMin, model.getMaxValue());
+        int[] minMax = SeededSpotQuantifier3DImageSupport.computeStackMinMax(this.imp);
+        int imgMin = minMax[0];
+        int imgMax = safeImgMax(imgMin, minMax[1]);
 
         areaEnabled   = true;
         areaThreshold = model.getTBg();
@@ -572,8 +574,9 @@ public class SeededSpotQuantifier3DFrame extends PlugInFrame {
         refreshCalibration();
         model.setImage(imp);
 
-        int imgMin = model.getMinValue();
-        int imgMax = safeImgMax(imgMin, model.getMaxValue());
+        int[] minMax = SeededSpotQuantifier3DImageSupport.computeStackMinMax(imp);
+        int imgMin = minMax[0];
+        int imgMax = safeImgMax(imgMin, minMax[1]);
 
         syncing = true;
         updateThreshSliderRanges(imgMin, imgMax);

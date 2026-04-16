@@ -30,6 +30,26 @@ public final class SeededSpotQuantifier3DImageSupport {
         image.flush();
     }
 
+    public static int[] computeStackMinMax(ImagePlus image) {
+        if (image == null || image.getStackSize() <= 0) return new int[]{0, 1};
+        int min = Integer.MAX_VALUE;
+        int max = Integer.MIN_VALUE;
+        for (int i = 1; i <= image.getStackSize(); i++) {
+            ImageProcessor ip = image.getStack().getProcessor(i);
+            int w = ip.getWidth();
+            int h = ip.getHeight();
+            for (int y = 0; y < h; y++) {
+                for (int x = 0; x < w; x++) {
+                    int v = (int) Math.round(ip.getPixelValue(x, y));
+                    if (v < min) min = v;
+                    if (v > max) max = v;
+                }
+            }
+        }
+        if (min == Integer.MAX_VALUE || max == Integer.MIN_VALUE) return new int[]{0, 1};
+        return new int[]{min, max};
+    }
+
     public static List<ImagePlus> listOpen3DImages() {
         List<ImagePlus> out = new ArrayList<>();
         int[] ids = WindowManager.getIDList();

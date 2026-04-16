@@ -83,9 +83,12 @@ public class SpotMeasurer {
 
         for (int label : new java.util.TreeSet<>(voxCount.keySet())) {
             long   nVox    = voxCount.get(label)[0];
+            double volume  = nVox * voxelVol;
             double totalI  = intDen.get(label)[0];
             double maxI    = maxInt.get(label)[0];
             double surfA   = surface.get(label)[0];
+            double sphereA = Math.cbrt(Math.PI) * Math.pow(6.0 * volume, 2.0 / 3.0);
+            double sphericity = surfA > 0.0 ? sphereA / surfA : 0.0;
             double cx      = sumX.get(label)[0] / nVox;
             double cy      = sumY.get(label)[0] / nVox;
             double cz      = sumZ.get(label)[0] / nVox;
@@ -93,8 +96,9 @@ public class SpotMeasurer {
             result.add(new SpotMeasurement(
                 label,
                 nVox,
-                nVox * voxelVol,
+                volume,
                 surfA,
+                sphericity,
                 totalI,
                 totalI / nVox,
                 maxI,

@@ -260,10 +260,27 @@ public class SeededSpotQuantifier3DMultiFrame extends PlugInFrame {
     }
 
     private Panel makeChannelRow() {
-        Panel p = new Panel(new FlowLayout(FlowLayout.LEFT, 4, 2));
-        p.add(windowSelectBtn);
-        p.add(new Label("Ch:"));
-        p.add(channelChoice);
+        Panel p = new Panel(new GridBagLayout());
+        GridBagConstraints c = new GridBagConstraints();
+        c.insets = new Insets(2, 4, 2, 4);
+        c.anchor = GridBagConstraints.WEST;
+
+        c.gridy = 0;
+        c.gridx = 0;
+        c.weightx = 0;
+        c.fill = GridBagConstraints.NONE;
+        p.add(windowSelectBtn, c);
+
+        c.gridy = 1;
+        c.gridx = 0;
+        c.weightx = 0;
+        c.fill = GridBagConstraints.NONE;
+        p.add(new Label("Ch:"), c);
+
+        c.gridx = 1;
+        c.weightx = 0.35;
+        c.fill = GridBagConstraints.HORIZONTAL;
+        p.add(channelChoice, c);
         return p;
     }
 
@@ -343,15 +360,19 @@ public class SeededSpotQuantifier3DMultiFrame extends PlugInFrame {
     }
 
     private Panel makeColorsRow() {
-        Panel p = new Panel(new FlowLayout(FlowLayout.LEFT, 4, 2));
-        p.add(new Label("Colors:"));
-        p.add(new Label("Seed:"));
-        p.add(seedColorChoice);
-        p.add(new Label("Area/ROI:"));
-        p.add(roiColorChoice);
-        p.add(new Label("Opacity %:"));
-        p.add(overlayOpacityField);
-        return p;
+        Panel outer = new Panel(new GridLayout(2, 1, 1, 1));
+        Panel row1 = new Panel(new FlowLayout(FlowLayout.LEFT, 4, 2));
+        row1.add(new Label("Colors:"));
+        row1.add(new Label("Seed:"));
+        row1.add(seedColorChoice);
+        row1.add(new Label("Area/ROI:"));
+        row1.add(roiColorChoice);
+        Panel row2 = new Panel(new FlowLayout(FlowLayout.LEFT, 4, 2));
+        row2.add(new Label("Opacity %:"));
+        row2.add(overlayOpacityField);
+        outer.add(row1);
+        outer.add(row2);
+        return outer;
     }
 
     private Panel makeSaveToggleRow() {
@@ -658,11 +679,13 @@ public class SeededSpotQuantifier3DMultiFrame extends PlugInFrame {
     }
 
     private void toggleSaveSection() {
+        int currentWidth = getWidth();
         saveSectionExpanded = !saveSectionExpanded;
         saveOptionsPanel.setVisible(saveSectionExpanded);
         saveToggleBtn.setLabel(saveSectionExpanded ? "\u25bc Save options" : "\u25b6 Save options");
         rightCenterPanel.validate();
         pack();
+        setSize(currentWidth, getHeight());
     }
 
     private void setSaveChecks(boolean state) {
@@ -836,8 +859,9 @@ public class SeededSpotQuantifier3DMultiFrame extends PlugInFrame {
             ImagePlus proc = SeededSpotQuantifier3DImageSupport.extractProcessingImage(row.rawImp, selectedCh);
             boolean owned = proc != row.rawImp;
             try {
-                int imgMin = (int) Math.floor(proc.getStatistics().min);
-                int imgMax = (int) Math.ceil(proc.getStatistics().max);
+                int[] minMax = SeededSpotQuantifier3DImageSupport.computeStackMinMax(proc);
+                int imgMin = minMax[0];
+                int imgMax = minMax[1];
                 min = min == null ? imgMin : Math.min(min, imgMin);
                 max = max == null ? imgMax : Math.max(max, imgMax);
             } finally {
