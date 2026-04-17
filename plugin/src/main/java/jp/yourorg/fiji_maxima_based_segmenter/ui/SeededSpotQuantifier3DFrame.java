@@ -244,6 +244,7 @@ public class SeededSpotQuantifier3DFrame extends PlugInFrame {
         wireEvents();
         startZWatch();
         updateTargetAvailability();
+        validate();
         pack();
         placeNearImage();
     }
@@ -269,7 +270,6 @@ public class SeededSpotQuantifier3DFrame extends PlugInFrame {
         addCenterRow(makeConnectivityRow(), row++);
         addCenterRow(makePreviewRow(), row++);
         addCenterRow(makeColorsRow(), row++);
-        addCenterRow(makeZProjRow(), row++);
         addCenterRow(makeSaveToggleRow(), row++);
         saveOptionsPanel = makeSaveOptionsPanel();
         addCenterRow(saveOptionsPanel, row++);
@@ -304,6 +304,14 @@ public class SeededSpotQuantifier3DFrame extends PlugInFrame {
         p.add(new Label("Ch:"), c);
         c.gridx = 1; c.weightx = 0.35; c.fill = GridBagConstraints.HORIZONTAL;
         p.add(channelChoice, c);
+
+        c.gridy = 2;
+        c.gridx = 0; c.weightx = 0; c.fill = GridBagConstraints.NONE;
+        p.add(new Label("Z-proj:"), c);
+        c.gridx = 1; c.weightx = 1.0; c.fill = GridBagConstraints.HORIZONTAL;
+        p.add(zprojChoice, c);
+        c.gridx = 2; c.weightx = 0; c.fill = GridBagConstraints.NONE;
+        p.add(zprojRefreshBtn, c);
         return p;
     }
 
@@ -716,7 +724,7 @@ public class SeededSpotQuantifier3DFrame extends PlugInFrame {
         seedThreshBar.addAdjustmentListener(e -> {
             if (syncing) return;
             int prevFg = seedThreshold;
-            seedThreshold = Math.max(seedThreshBar.getValue(), areaThreshold);
+            seedThreshold = seedThreshBar.getValue();
             model.setTFg(seedThreshold);
             syncing = true;
             seedThreshBar.setValue(seedThreshold);
@@ -955,7 +963,7 @@ public class SeededSpotQuantifier3DFrame extends PlugInFrame {
         int prevFg = seedThreshold;
         int v = parseIntOr(seedThreshField.getText(), seedThreshold);
         v = Math.max(0, v);
-        seedThreshold = Math.max(v, areaThreshold);
+        seedThreshold = v;
         model.setTFg(seedThreshold);
         syncing = true;
         seedThreshBar.setValue(seedThreshold);
@@ -1531,6 +1539,9 @@ public class SeededSpotQuantifier3DFrame extends PlugInFrame {
             saveOptionsPanel.validate();
             saveOptionsPanel.repaint();
         }
+        int currentWidth = getWidth();
+        pack();
+        setSize(currentWidth, getHeight());
     }
 
     private int currentSaveChecksColumns() {

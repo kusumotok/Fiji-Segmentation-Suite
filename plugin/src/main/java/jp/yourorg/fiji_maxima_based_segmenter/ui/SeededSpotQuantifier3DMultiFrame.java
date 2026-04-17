@@ -211,6 +211,7 @@ public class SeededSpotQuantifier3DMultiFrame extends PlugInFrame {
         refreshTargetRows();
         startZWatch();
         updateControlStates();
+        validate();
         pack();
         placeNearActiveWindow();
     }
@@ -491,7 +492,7 @@ public class SeededSpotQuantifier3DMultiFrame extends PlugInFrame {
         seedThreshBar.addAdjustmentListener(e -> {
             if (syncing) return;
             int prevFg = seedThreshold;
-            seedThreshold = Math.max(seedThreshBar.getValue(), areaThreshold);
+            seedThreshold = seedThreshBar.getValue();
             model.setTFg(seedThreshold);
             syncing = true;
             seedThreshBar.setValue(seedThreshold);
@@ -1253,6 +1254,9 @@ public class SeededSpotQuantifier3DMultiFrame extends PlugInFrame {
             saveOptionsPanel.validate();
             saveOptionsPanel.repaint();
         }
+        int currentWidth = getWidth();
+        pack();
+        setSize(currentWidth, getHeight());
     }
 
     private int currentSaveChecksColumns() {
@@ -1505,7 +1509,7 @@ public class SeededSpotQuantifier3DMultiFrame extends PlugInFrame {
     private void commitSeedThreshField() {
         if (syncing) return;
         int prevFg = seedThreshold;
-        seedThreshold = Math.max(parseIntOr(seedThreshField.getText(), seedThreshold), areaThreshold);
+        seedThreshold = Math.max(parseIntOr(seedThreshField.getText(), seedThreshold), 0);
         model.setTFg(seedThreshold);
         syncing = true;
         seedThreshBar.setValue(seedThreshold);
