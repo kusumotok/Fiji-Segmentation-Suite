@@ -8,6 +8,7 @@ import ij.gui.Overlay;
 import ij.gui.Roi;
 import ij.measure.Calibration;
 import ij.plugin.Duplicator;
+import ij.plugin.ZProjector;
 import ij.plugin.filter.ThresholdToSelection;
 import ij.plugin.frame.PlugInFrame;
 import ij.process.ByteProcessor;
@@ -124,7 +125,7 @@ public class SeededSpotQuantifier3DFrame extends PlugInFrame {
     private final TextField overlayOpacityField;
 
     private final Choice zprojChoice;
-    private final Button zprojRefreshBtn = new Button("Reload");
+    private final Button createZProjBtn = new Button("Max Proj");
 
     private final Label statusLabel = new Label("", Label.LEFT);
     private boolean cleanupDone = false;
@@ -311,7 +312,7 @@ public class SeededSpotQuantifier3DFrame extends PlugInFrame {
         c.gridx = 1; c.weightx = 1.0; c.fill = GridBagConstraints.HORIZONTAL;
         p.add(zprojChoice, c);
         c.gridx = 2; c.weightx = 0; c.fill = GridBagConstraints.NONE;
-        p.add(zprojRefreshBtn, c);
+        p.add(createZProjBtn, c);
         return p;
     }
 
@@ -391,7 +392,7 @@ public class SeededSpotQuantifier3DFrame extends PlugInFrame {
         c.gridx = 1; c.weightx = 1; c.fill = GridBagConstraints.HORIZONTAL;
         p.add(zprojChoice, c);
         c.gridx = 2; c.weightx = 0; c.fill = GridBagConstraints.NONE;
-        p.add(zprojRefreshBtn, c);
+        p.add(createZProjBtn, c);
         return p;
     }
 
@@ -655,7 +656,7 @@ public class SeededSpotQuantifier3DFrame extends PlugInFrame {
         roiColorChoice.setEnabled(hasTarget);
         overlayOpacityField.setEnabled(hasTarget);
         zprojChoice.setEnabled(hasTarget);
-        zprojRefreshBtn.setEnabled(hasTarget);
+        createZProjBtn.setEnabled(hasTarget);
         saveToggleBtn.setEnabled(hasTarget);
         saveOptionsPanel.setEnabled(hasTarget);
         saveSeedRoiCheck.setEnabled(hasTarget);
@@ -707,7 +708,7 @@ public class SeededSpotQuantifier3DFrame extends PlugInFrame {
         areaThreshBar.addAdjustmentListener(e -> {
             if (syncing) return;
             int prevBg = areaThreshold;
-            areaThreshold = Math.min(areaThreshBar.getValue(), seedThreshold);
+            areaThreshold = areaThreshBar.getValue();
             model.setTBg(areaThreshold);
             syncing = true;
             areaThreshBar.setValue(areaThreshold);
@@ -798,7 +799,7 @@ public class SeededSpotQuantifier3DFrame extends PlugInFrame {
             if (!updatingZProjChoice && !syncing) zProjSelectionManual = true;
             onColorChanged();
         });
-        zprojRefreshBtn.addActionListener(e -> refreshZProjChoiceItems());
+        createZProjBtn.addActionListener(e -> createMaxProjection());
 
         saveToggleBtn.addActionListener(e -> toggleSaveSection());
         customFolderCheck.addItemListener(e -> updateTargetAvailability());
@@ -884,8 +885,8 @@ public class SeededSpotQuantifier3DFrame extends PlugInFrame {
         if (syncing) return;
         int prevBg = areaThreshold;
         int prevFg = seedThreshold;
-        areaThreshold = Math.min(tBg, tFg);
-        seedThreshold = Math.max(tBg, tFg);
+        areaThreshold = tBg;
+        seedThreshold = tFg;
         model.setTBg(areaThreshold);
         model.setTFg(seedThreshold);
         syncing = true;
@@ -948,7 +949,7 @@ public class SeededSpotQuantifier3DFrame extends PlugInFrame {
         int prevBg = areaThreshold;
         int v = parseIntOr(areaThreshField.getText(), areaThreshold);
         v = Math.max(0, v);
-        areaThreshold = Math.min(v, seedThreshold);
+        areaThreshold = v;
         model.setTBg(areaThreshold);
         syncing = true;
         areaThreshBar.setValue(areaThreshold);
@@ -1186,6 +1187,17 @@ public class SeededSpotQuantifier3DFrame extends PlugInFrame {
         if (zp == null || zp.getProcessor() == null) return null;
         if (zp.getWidth() != imp.getWidth() || zp.getHeight() != imp.getHeight()) return null;
         return zp;
+    }
+
+    private void createMaxProjection() {
+        if (rawImp == null || imp == null) return;
+        ZProjector proj = new ZProjector(imp);
+        proj.setMethod(ZProjector.MAX_METHOD);
+        proj.doProjection();
+        ImagePlus result = proj.getProjection();
+        result.setTitle("MAX_" + rawImp.getTitle());
+        result.show();
+        refreshZProjChoiceItems();
     }
 
     private void refreshZProjChoiceItems() {

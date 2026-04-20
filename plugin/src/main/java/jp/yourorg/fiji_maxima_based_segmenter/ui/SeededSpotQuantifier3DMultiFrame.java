@@ -475,7 +475,7 @@ public class SeededSpotQuantifier3DMultiFrame extends PlugInFrame {
         areaThreshBar.addAdjustmentListener(e -> {
             if (syncing) return;
             int prevBg = areaThreshold;
-            areaThreshold = Math.min(areaThreshBar.getValue(), seedThreshold);
+            areaThreshold = areaThreshBar.getValue();
             model.setTBg(areaThreshold);
             syncing = true;
             areaThreshBar.setValue(areaThreshold);
@@ -941,8 +941,8 @@ public class SeededSpotQuantifier3DMultiFrame extends PlugInFrame {
         if (syncing) return;
         int prevBg = areaThreshold;
         int prevFg = seedThreshold;
-        areaThreshold = Math.min(tBg, tFg);
-        seedThreshold = Math.max(tBg, tFg);
+        areaThreshold = tBg;
+        seedThreshold = tFg;
         model.setTBg(areaThreshold);
         model.setTFg(seedThreshold);
         syncing = true;
@@ -1496,7 +1496,7 @@ public class SeededSpotQuantifier3DMultiFrame extends PlugInFrame {
     private void commitAreaThreshField() {
         if (syncing) return;
         int prevBg = areaThreshold;
-        areaThreshold = Math.min(parseIntOr(areaThreshField.getText(), areaThreshold), seedThreshold);
+        areaThreshold = Math.max(parseIntOr(areaThreshField.getText(), areaThreshold), 0);
         model.setTBg(areaThreshold);
         syncing = true;
         areaThreshBar.setValue(areaThreshold);

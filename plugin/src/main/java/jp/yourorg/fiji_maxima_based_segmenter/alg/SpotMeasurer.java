@@ -45,13 +45,14 @@ public class SpotMeasurer {
         int d = labelStack.getSize();
 
         // Per-label accumulators (use HashMap; labels may be sparse after filtering)
-        Map<Integer, long[]>   voxCount = new HashMap<>();  // [0]
-        Map<Integer, double[]> intDen   = new HashMap<>();  // [0] = sum of intensity
-        Map<Integer, double[]> maxInt   = new HashMap<>();  // [0] = max intensity
-        Map<Integer, double[]> surface  = new HashMap<>();  // [0] = surface area
-        Map<Integer, double[]> sumX     = new HashMap<>();  // [0]
-        Map<Integer, double[]> sumY     = new HashMap<>();  // [0]
-        Map<Integer, double[]> sumZ     = new HashMap<>();  // [0]
+        Map<Integer, long[]>        voxCount = new HashMap<>();  // [0]
+        Map<Integer, double[]>      intDen   = new HashMap<>();  // [0] = sum of intensity
+        Map<Integer, double[]>      maxInt   = new HashMap<>();  // [0] = max intensity
+        Map<Integer, double[]>      surface  = new HashMap<>();  // [0] = surface area
+        Map<Integer, double[]>      sumX     = new HashMap<>();  // [0]
+        Map<Integer, double[]>      sumY     = new HashMap<>();  // [0]
+        Map<Integer, double[]>      sumZ     = new HashMap<>();  // [0]
+        Map<Integer, List<int[]>>   voxels   = new HashMap<>();  // for max Feret diameter
         double yzFace = vh * vd;
         double xzFace = vw * vd;
         double xyFace = vw * vh;
@@ -75,6 +76,7 @@ public class SpotMeasurer {
                     sumX    .computeIfAbsent(label, k -> new double[1])[0] += x;
                     sumY    .computeIfAbsent(label, k -> new double[1])[0] += y;
                     sumZ    .computeIfAbsent(label, k -> new double[1])[0] += (z - 1); // 0-based Z index
+                    voxels  .computeIfAbsent(label, k -> new ArrayList<>()).add(new int[]{x, y, z - 1});
 
                     double exposed = 0.0;
                     if (x == 0 || (int) Math.round(labelIp.getPixelValue(x - 1, y)) != label) exposed += yzFace;
@@ -104,6 +106,7 @@ public class SpotMeasurer {
             double cy      = sumY.get(label)[0] / nVox;
             double cz      = sumZ.get(label)[0] / nVox;
 
+            double maxFeret = computeMaxFeret3D(voxels.get(label), vw, vh, vd);
             result.add(new SpotMeasurement(
                 label,
                 nVox,
@@ -115,10 +118,29 @@ public class SpotMeasurer {
                 maxI,
                 cx * vw,
                 cy * vh,
-                cz * vd
+                cz * vd,
+                maxFeret
             ));
         }
         return result;
+    }
+
+    private static double computeMaxFeret3D(List<int[]> pts, double vw, double vh, double vd) {
+        if (pts == null || pts.size() < 2) return 0.0;
+        double maxDist2 = 0.0;
+        int n = pts.size();
+        for (int i = 0; i < n; i++) {
+            int[] a = pts.get(i);
+            for (int j = i + 1; j < n; j++) {
+                int[] b = pts.get(j);
+                double dx = (a[0] - b[0]) * vw;
+                double dy = (a[1] - b[1]) * vh;
+                double dz = (a[2] - b[2]) * vd;
+                double d2 = dx * dx + dy * dy + dz * dz;
+                if (d2 > maxDist2) maxDist2 = d2;
+            }
+        }
+        return Math.sqrt(maxDist2);
     }
 
     private static void checkCancelled(BooleanSupplier shouldCancel) {

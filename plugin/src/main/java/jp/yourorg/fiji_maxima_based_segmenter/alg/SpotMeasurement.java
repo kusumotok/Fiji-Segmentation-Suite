@@ -12,11 +12,13 @@ public class SpotMeasurement {
     public final double centroidXUm;
     public final double centroidYUm;
     public final double centroidZUm;
+    public final double maxFeret3DUm;
 
     public SpotMeasurement(int id, long volumeVox, double volumeUm3, double surfaceAreaUm2,
                             double sphericity,
                             double integratedIntensity, double meanIntensity, double maxIntensity,
-                            double centroidXUm, double centroidYUm, double centroidZUm) {
+                            double centroidXUm, double centroidYUm, double centroidZUm,
+                            double maxFeret3DUm) {
         this.id                  = id;
         this.volumeVox           = volumeVox;
         this.volumeUm3           = volumeUm3;
@@ -28,5 +30,6 @@ public class SpotMeasurement {
         this.centroidXUm         = centroidXUm;
         this.centroidYUm         = centroidYUm;
         this.centroidZUm         = centroidZUm;
+        this.maxFeret3DUm        = maxFeret3DUm;
     }
 }
