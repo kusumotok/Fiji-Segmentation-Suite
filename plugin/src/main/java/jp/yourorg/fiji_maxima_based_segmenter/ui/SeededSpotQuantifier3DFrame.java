@@ -108,8 +108,8 @@ public class SeededSpotQuantifier3DFrame extends PlugInFrame {
     private final Checkbox  saveSeedRoiCheck   = new Checkbox("Seed ROI",   false);
     private final Checkbox  saveSizeRoiCheck   = new Checkbox("Size ROI",   false);
     private final Checkbox  saveAreaRoiCheck   = new Checkbox("Area ROI",   false);
-    private final Checkbox  saveResultRoiCheck = new Checkbox("Result ROI", true);
-    private final Checkbox  saveResultRoiByObjectCheck = new Checkbox("Result ROI by object", false);
+    private final Checkbox  saveResultRoiCheck = new Checkbox("Result ROI", false);
+    private final Checkbox  saveResultRoiByObjectCheck = new Checkbox("Result ROI by object", true);
     private final Checkbox  saveCsvCheck       = new Checkbox("CSV",        true);
     private final Checkbox  saveParamCheck     = new Checkbox("Param",      true);
     private final Checkbox  customFolderCheck  = new Checkbox("Custom folder name:", false);
@@ -1193,14 +1193,32 @@ public class SeededSpotQuantifier3DFrame extends PlugInFrame {
     }
 
     private void createMaxProjection() {
-        if (rawImp == null || imp == null) return;
-        ZProjector proj = new ZProjector(imp);
-        proj.setMethod(ZProjector.MAX_METHOD);
-        proj.doProjection();
-        ImagePlus result = proj.getProjection();
+        if (rawImp == null) return;
+        ImagePlus result = createMaxProjection(rawImp);
+        if (result == null) return;
         result.setTitle("MAX_" + rawImp.getTitle());
         result.show();
         refreshZProjChoiceItems();
+    }
+
+    private static ImagePlus createMaxProjection(ImagePlus source) {
+        if (source == null) return null;
+        int nCh = Math.max(1, source.getNChannels());
+        int nT = Math.max(1, source.getNFrames());
+
+        ZProjector proj = new ZProjector(source);
+        proj.setMethod(ZProjector.MAX_METHOD);
+        if (nCh > 1 || nT > 1) proj.doHyperStackProjection(true);
+        else proj.doProjection();
+        ImagePlus result = proj.getProjection();
+        if (result == null) return null;
+        if (nCh > 1 || nT > 1) {
+            result.setOpenAsHyperStack(true);
+        }
+        if (source.getCalibration() != null) {
+            result.setCalibration(source.getCalibration().copy());
+        }
+        return result;
     }
 
     private void refreshZProjChoiceItems() {

@@ -111,8 +111,8 @@ public class SeededSpotQuantifier3DMultiFrame extends PlugInFrame {
     private final Checkbox saveSeedRoiCheck           = new Checkbox("Seed ROI", false);
     private final Checkbox saveSizeRoiCheck           = new Checkbox("Size ROI", false);
     private final Checkbox saveAreaRoiCheck           = new Checkbox("Area ROI", false);
-    private final Checkbox saveResultRoiCheck         = new Checkbox("Result ROI", true);
-    private final Checkbox saveResultRoiByObjectCheck = new Checkbox("Result ROI by object", false);
+    private final Checkbox saveResultRoiCheck         = new Checkbox("Result ROI", false);
+    private final Checkbox saveResultRoiByObjectCheck = new Checkbox("Result ROI by object", true);
     private final Checkbox saveCsvCheck               = new Checkbox("CSV", true);
     private final Checkbox saveParamCheck             = new Checkbox("Param", true);
     private final Checkbox customFolderCheck  = new Checkbox("Custom folder name:", false);
