@@ -117,6 +117,12 @@ public final class SeededSpotQuantifier3DImageSupport {
 
     public static int[] buildProjectedPreviewTypeMap(ImagePlus finalLabelImp, ImagePlus seedLabelImp,
                                                      boolean areaEnabled, Consumer<String> progress) {
+        return buildProjectedPreviewTypeMap(finalLabelImp, seedLabelImp, areaEnabled, true, progress);
+    }
+
+    public static int[] buildProjectedPreviewTypeMap(ImagePlus finalLabelImp, ImagePlus seedLabelImp,
+                                                     boolean areaEnabled, boolean seedPriority,
+                                                     Consumer<String> progress) {
         if (finalLabelImp == null) return null;
         int w = finalLabelImp.getWidth();
         int h = finalLabelImp.getHeight();
@@ -129,13 +135,21 @@ public final class SeededSpotQuantifier3DImageSupport {
             for (int x = 0; x < w; x++) {
                 int type = 0;
                 for (int z = 1; z <= d; z++) {
-                    if (hasSeed && z <= seedLabelImp.getNSlices()
-                            && (int) Math.round(seedLabelImp.getStack().getProcessor(z).getPixelValue(x, y)) > 0) {
-                        type = 1;
-                        break;
-                    }
-                    if ((int) Math.round(finalLabelImp.getStack().getProcessor(z).getPixelValue(x, y)) > 0) {
-                        type = 2;
+                    boolean isSeed = hasSeed && z <= seedLabelImp.getNSlices()
+                        && (int) Math.round(seedLabelImp.getStack().getProcessor(z).getPixelValue(x, y)) > 0;
+                    boolean isFinal = (int) Math.round(finalLabelImp.getStack().getProcessor(z).getPixelValue(x, y)) > 0;
+                    if (seedPriority) {
+                        if (isSeed) {
+                            type = 1;
+                            break;
+                        }
+                        if (isFinal) type = 2;
+                    } else {
+                        if (isFinal) {
+                            type = 2;
+                            break;
+                        }
+                        if (isSeed) type = 1;
                     }
                 }
                 typeMap[y * w + x] = type;

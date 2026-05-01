@@ -1466,6 +1466,7 @@ public class SeededSpotQuantifier3DMultiFrame extends PlugInFrame {
             finalSeg.labelImage,
             seedSeg != null ? seedSeg.labelImage : null,
             areaEn,
+            seedThreshold >= areaThreshold,
             null);
         int seedRgb = toRgbSolid(selectedSeedPreviewColor());
         int areaRgb = toRgbSolid(selectedRoiColor());
@@ -1525,6 +1526,7 @@ public class SeededSpotQuantifier3DMultiFrame extends PlugInFrame {
                     finalSeg.labelImage,
                     seedSeg != null ? seedSeg.labelImage : null,
                     areaEn,
+                    seedThreshold >= areaThreshold,
                     progress);
             }
             int w = finalSeg.labelImage.getWidth();

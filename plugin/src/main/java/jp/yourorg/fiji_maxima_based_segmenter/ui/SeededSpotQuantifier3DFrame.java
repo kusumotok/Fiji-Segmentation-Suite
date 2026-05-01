@@ -1339,6 +1339,7 @@ public class SeededSpotQuantifier3DFrame extends PlugInFrame {
                 finalSeg.labelImage,
                 seedSeg != null ? seedSeg.labelImage : null,
                 areaEn,
+                seedThreshold >= areaThreshold,
                 null);
         }
 
@@ -1397,6 +1398,7 @@ public class SeededSpotQuantifier3DFrame extends PlugInFrame {
                     finalSeg.labelImage,
                     seedSeg != null ? seedSeg.labelImage : null,
                     areaEn,
+                    seedThreshold >= areaThreshold,
                     progress);
             }
             cachedZProjAreaRois = new ArrayList<>();
