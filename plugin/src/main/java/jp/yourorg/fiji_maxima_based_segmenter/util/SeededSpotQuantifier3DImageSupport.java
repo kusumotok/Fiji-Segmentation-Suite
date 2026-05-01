@@ -115,6 +115,76 @@ public final class SeededSpotQuantifier3DImageSupport {
         return buildLabelUnionRois(labelImp, null, null);
     }
 
+    public static int[] buildProjectedPreviewTypeMap(ImagePlus finalLabelImp, ImagePlus seedLabelImp,
+                                                     boolean areaEnabled, Consumer<String> progress) {
+        if (finalLabelImp == null) return null;
+        int w = finalLabelImp.getWidth();
+        int h = finalLabelImp.getHeight();
+        int d = finalLabelImp.getNSlices();
+        int[] typeMap = new int[w * h];
+        boolean hasSeed = areaEnabled && seedLabelImp != null;
+
+        reportProgress(progress, "projecting 3D labels to 2D");
+        for (int y = 0; y < h; y++) {
+            for (int x = 0; x < w; x++) {
+                int type = 0;
+                for (int z = 1; z <= d; z++) {
+                    if (hasSeed && z <= seedLabelImp.getNSlices()
+                            && (int) Math.round(seedLabelImp.getStack().getProcessor(z).getPixelValue(x, y)) > 0) {
+                        type = 1;
+                        break;
+                    }
+                    if ((int) Math.round(finalLabelImp.getStack().getProcessor(z).getPixelValue(x, y)) > 0) {
+                        type = 2;
+                    }
+                }
+                typeMap[y * w + x] = type;
+            }
+        }
+        return typeMap;
+    }
+
+    public static Roi buildProjectedTypeRoi(int[] typeMap, int w, int h, int type,
+                                            String labelKind, Consumer<String> progress) {
+        if (typeMap == null || typeMap.length != w * h) return null;
+        reportProgress(progress, phasePrefix(labelKind) + "building 2D ROI outline");
+        int minX = w, minY = h, maxX = -1, maxY = -1;
+        for (int y = 0; y < h; y++) {
+            int row = y * w;
+            for (int x = 0; x < w; x++) {
+                if (typeMap[row + x] != type) continue;
+                if (x < minX) minX = x;
+                if (y < minY) minY = y;
+                if (x > maxX) maxX = x;
+                if (y > maxY) maxY = y;
+            }
+        }
+        if (maxX < minX || maxY < minY) return null;
+
+        int x0 = Math.max(0, minX - 1);
+        int y0 = Math.max(0, minY - 1);
+        int x1 = Math.min(w - 1, maxX + 1);
+        int y1 = Math.min(h - 1, maxY + 1);
+        int bw = x1 - x0 + 1;
+        int bh = y1 - y0 + 1;
+        ByteProcessor bp = new ByteProcessor(bw, bh);
+        byte[] pixels = (byte[]) bp.getPixels();
+        for (int y = y0; y <= y1; y++) {
+            int srcRow = y * w;
+            int dstRow = (y - y0) * bw;
+            for (int x = x0; x <= x1; x++) {
+                if (typeMap[srcRow + x] == type) {
+                    pixels[dstRow + (x - x0)] = (byte) 255;
+                }
+            }
+        }
+        bp.setThreshold(255, 255, ImageProcessor.NO_LUT_UPDATE);
+        Roi roi = ThresholdToSelection.run(new ImagePlus("", bp));
+        if (roi == null) return null;
+        roi.setLocation(roi.getXBase() + x0, roi.getYBase() + y0);
+        return roi;
+    }
+
     public static List<Roi> buildLabelUnionRois(ImagePlus labelImp, String labelKind, Consumer<String> progress) {
         int w = labelImp.getWidth();
         int h = labelImp.getHeight();

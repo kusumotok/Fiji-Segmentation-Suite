@@ -53,6 +53,7 @@ public class Seeded_Spot_Quantifier_3D_ implements PlugIn {
             double gaussZ = parseDouble(options, "gauss_z", 0.5);
             int conn = parseInt(options, "connectivity", 6);
             boolean fillHoles = parseBool(options, "fill_holes", false);
+            QuantifierParams.AreaConflictMode areaConflictMode = parseAreaConflictMode(options);
             int channel = parseInt(options, "channel", Math.max(1, imp.getC()));
             boolean saveSeedRoi = parseBool(options, "save_seed_roi", false);
             boolean saveSizeRoi = parseBool(options, "save_size_roi", false);
@@ -66,7 +67,7 @@ public class Seeded_Spot_Quantifier_3D_ implements PlugIn {
             String outputDir = parseString(options, "output", null);
 
             QuantifierParams params = new QuantifierParams(
-                areaThreshold, minVol, maxVol, gauss, gaussXY, gaussZ, conn, fillHoles);
+                areaThreshold, minVol, maxVol, gauss, gaussXY, gaussZ, conn, fillHoles, areaConflictMode);
 
             int selectedChannel = Math.max(1, Math.min(Math.max(1, imp.getNChannels()), channel));
             procImp = SeededSpotQuantifier3DImageSupport.extractProcessingImage(imp, selectedChannel);
@@ -100,6 +101,11 @@ public class Seeded_Spot_Quantifier_3D_ implements PlugIn {
         } catch (Exception ex) {
             IJ.error("Seeded Spot Quantifier 3D", "Error: " + ex.getMessage());
             IJ.handleException(ex);
+        } catch (OutOfMemoryError err) {
+            System.gc();
+            String detail = err.getMessage();
+            IJ.error("Seeded Spot Quantifier 3D",
+                "Out of memory" + (detail == null || detail.isEmpty() ? "." : ": " + detail));
         } finally {
             SeededSpotQuantifier3DImageSupport.disposeProcessingImage(procImp, ownsProcImp);
         }
@@ -144,5 +150,11 @@ public class Seeded_Spot_Quantifier_3D_ implements PlugIn {
     private static String parseString(String opts, String key, String def) {
         String v = Macro.getValue(opts, key, null);
         return (v == null || v.trim().isEmpty()) ? def : v.trim();
+    }
+
+    private static QuantifierParams.AreaConflictMode parseAreaConflictMode(String opts) {
+        String v = parseString(opts, "area_conflict", "max").toLowerCase();
+        if ("split".equals(v)) return QuantifierParams.AreaConflictMode.SPLIT;
+        return QuantifierParams.AreaConflictMode.MAX_OVERLAP;
     }
 }

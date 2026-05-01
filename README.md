@@ -30,6 +30,7 @@ single-image 向けの GUI で、window / channel 選択、preview、保存、ba
 - `Min / Max vol` フィルタ
 - `Connectivity`
 - `Fill holes`
+- `Area conflict`: `max` / `split`
 - `Gaussian blur`
 - `Seed preview` / `ROI boundaries` preview
 - `Apply`, `Save`, `Save to...`, `Batch...`, `Cancel`
@@ -114,7 +115,7 @@ run("Seeded Spot Quantifier 3D",
     "area_threshold=200 seed_threshold=500 " +
     "min_vol=0.1 max_vol=50.0 " +
     "gaussian_blur=false gauss_xy=1.0 gauss_z=0.5 " +
-    "connectivity=6 fill_holes=false " +
+    "connectivity=6 fill_holes=false area_conflict=max " +
     "save_result_roi_by_object=true save_csv=true save_param=true " +
     "output=[C:/path/to/output]");
 ```
@@ -132,6 +133,7 @@ run("Seeded Spot Quantifier 3D",
 - `gauss_z`
 - `connectivity`
 - `fill_holes`
+- `area_conflict` (`max` or `split`)
 - `save_seed_roi`
 - `save_size_roi`
 - `save_area_roi`

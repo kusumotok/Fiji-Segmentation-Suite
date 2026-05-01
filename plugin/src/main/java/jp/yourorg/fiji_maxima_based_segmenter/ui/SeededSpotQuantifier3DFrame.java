@@ -8,7 +8,6 @@ import ij.gui.Overlay;
 import ij.gui.Roi;
 import ij.measure.Calibration;
 import ij.plugin.Duplicator;
-import ij.plugin.ZProjector;
 import ij.plugin.filter.ThresholdToSelection;
 import ij.plugin.frame.PlugInFrame;
 import ij.process.ByteProcessor;
@@ -24,13 +23,16 @@ import java.awt.event.*;
 import java.io.File;
 import java.nio.file.Files;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.Timer;
 import java.util.TimerTask;
 import java.util.TreeSet;
 import java.util.concurrent.CancellationException;
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Consumer;
@@ -93,11 +95,15 @@ public class SeededSpotQuantifier3DFrame extends PlugInFrame {
 
     private final Choice   connectivityChoice;
     private final Checkbox fillHolesCheck;
+    private final CheckboxGroup areaConflictGroup = new CheckboxGroup();
+    private final Checkbox areaConflictMax;
+    private final Checkbox areaConflictSplit;
 
     private final CheckboxGroup previewGroup = new CheckboxGroup();
     private final Checkbox previewOff;
     private final Checkbox previewOverlay;
     private final Checkbox previewRoi;
+    private final Checkbox previewRoiLight;
 
     private final Button applyBtn   = new Button("Apply");
     private final Button saveAllBtn = new Button("Save");
@@ -216,6 +222,8 @@ public class SeededSpotQuantifier3DFrame extends PlugInFrame {
         connectivityChoice.add("26");
         connectivityChoice.select("6");
         fillHolesCheck = new Checkbox("Fill holes", false);
+        areaConflictMax = new Checkbox("Area conflict: max", areaConflictGroup, true);
+        areaConflictSplit = new Checkbox("split", areaConflictGroup, false);
 
         processingImageChoice = new Choice();
         channelChoice = new Choice();
@@ -223,6 +231,7 @@ public class SeededSpotQuantifier3DFrame extends PlugInFrame {
         previewOff     = new Checkbox("Off",     previewGroup, true);
         previewOverlay = new Checkbox("Overlay", previewGroup, false);
         previewRoi     = new Checkbox("ROI",     previewGroup, false);
+        previewRoiLight = new Checkbox("ROI light", previewGroup, false);
 
         seedColorChoice = new Choice();
         for (String[] entry : PREVIEW_COLOR_OPTIONS) seedColorChoice.add(entry[0]);
@@ -270,6 +279,7 @@ public class SeededSpotQuantifier3DFrame extends PlugInFrame {
         addCenterRow(makeVolRow("Max vol \u00b5m\u00b3 (seed):", maxVolCheck, maxVolBar, maxVolField), row++);
         addCenterRow(makeAreaThreshRow(), row++);
         addCenterRow(makeConnectivityRow(), row++);
+        addCenterRow(makeAreaConflictRow(), row++);
         addCenterRow(makePreviewRow(), row++);
         addCenterRow(makeColorsRow(), row++);
         addCenterRow(makeSaveToggleRow(), row++);
@@ -381,6 +391,13 @@ public class SeededSpotQuantifier3DFrame extends PlugInFrame {
         return p;
     }
 
+    private Panel makeAreaConflictRow() {
+        Panel p = new Panel(new FlowLayout(FlowLayout.LEFT, 4, 2));
+        p.add(areaConflictMax);
+        p.add(areaConflictSplit);
+        return p;
+    }
+
     /** Z-proj row: label fixed, Choice stretches with window, Reload fixed. */
     private Panel makeZProjRow() {
         Panel p = new Panel(new GridBagLayout());
@@ -434,6 +451,7 @@ public class SeededSpotQuantifier3DFrame extends PlugInFrame {
         p.add(previewOff);
         p.add(previewOverlay);
         p.add(previewRoi);
+        p.add(previewRoiLight);
         return p;
     }
 
@@ -651,9 +669,12 @@ public class SeededSpotQuantifier3DFrame extends PlugInFrame {
         maxVolField.setEnabled(hasTarget && maxVolEnabled);
         connectivityChoice.setEnabled(hasTarget);
         fillHolesCheck.setEnabled(hasTarget);
+        areaConflictMax.setEnabled(hasTarget);
+        areaConflictSplit.setEnabled(hasTarget);
         previewOff.setEnabled(hasTarget);
         previewOverlay.setEnabled(hasTarget);
         previewRoi.setEnabled(hasTarget);
+        previewRoiLight.setEnabled(hasTarget);
         seedColorChoice.setEnabled(hasTarget);
         roiColorChoice.setEnabled(hasTarget);
         overlayOpacityField.setEnabled(hasTarget);
@@ -784,11 +805,14 @@ public class SeededSpotQuantifier3DFrame extends PlugInFrame {
 
         connectivityChoice.addItemListener(e -> onParamsChanged());
         fillHolesCheck    .addItemListener(e -> onParamsChanged());
+        areaConflictMax   .addItemListener(e -> onParamsChanged());
+        areaConflictSplit .addItemListener(e -> onParamsChanged());
 
         ItemListener previewListener = e -> onPreviewModeChanged();
         previewOff    .addItemListener(previewListener);
         previewOverlay.addItemListener(previewListener);
         previewRoi    .addItemListener(previewListener);
+        previewRoiLight.addItemListener(previewListener);
 
         seedColorChoice    .addItemListener(e -> onColorChanged());
         roiColorChoice     .addItemListener(e -> onColorChanged());
@@ -916,6 +940,9 @@ public class SeededSpotQuantifier3DFrame extends PlugInFrame {
     }
 
     private void onPreviewModeChanged() {
+        cachedZProjTypeMap = null;
+        cachedZProjSeedRois = null;
+        cachedZProjAreaRois = null;
         if (previewOff.getState()) {
             clearOverlay();
             cancelPreview();
@@ -936,11 +963,15 @@ public class SeededSpotQuantifier3DFrame extends PlugInFrame {
     private void onColorChanged() {
         if (previewOff.getState() || cachedSeededResult == null) return;
         int zPlane = currentZPlane();
-        if (previewRoi.getState())
-            renderRoiOverlay(cachedSeededResult.seedSeg, cachedSeededResult.finalSeg,
-                             areaEnabled, zPlane);
-        else
-            renderOverlay(cachedSeededResult.seedSeg, cachedSeededResult.finalSeg, areaEnabled, zPlane);
+        try {
+            if (isRoiPreviewMode())
+                renderRoiOverlay(cachedSeededResult.seedSeg, cachedSeededResult.finalSeg,
+                                 areaEnabled, zPlane);
+            else
+                renderOverlay(cachedSeededResult.seedSeg, cachedSeededResult.finalSeg, areaEnabled, zPlane);
+        } catch (OutOfMemoryError err) {
+            handlePreviewOutOfMemory(err);
+        }
     }
 
     // =========================================================
@@ -1008,11 +1039,15 @@ public class SeededSpotQuantifier3DFrame extends PlugInFrame {
     private void updatePreviewForZChange() {
         if (previewOff.getState() || cachedSeededResult == null) return;
         int zPlane = currentZPlane();
-        if (previewRoi.getState())
-            renderRoiOverlay(cachedSeededResult.seedSeg, cachedSeededResult.finalSeg,
-                             areaEnabled, zPlane);
-        else
-            renderOverlay(cachedSeededResult.seedSeg, cachedSeededResult.finalSeg, areaEnabled, zPlane);
+        try {
+            if (isRoiPreviewMode())
+                renderRoiOverlay(cachedSeededResult.seedSeg, cachedSeededResult.finalSeg,
+                                 areaEnabled, zPlane);
+            else
+                renderOverlay(cachedSeededResult.seedSeg, cachedSeededResult.finalSeg, areaEnabled, zPlane);
+        } catch (OutOfMemoryError err) {
+            handlePreviewOutOfMemory(err);
+        }
     }
 
     private void cancelPreview() {
@@ -1107,6 +1142,14 @@ public class SeededSpotQuantifier3DFrame extends PlugInFrame {
                                    SegmentationResult3D finalSeg,
                                    boolean areaEnabled, int zPlane,
                                    Consumer<String> progress) {
+        renderRoiOverlay(seedSeg, finalSeg, areaEnabled, zPlane, previewRoiLight.getState(), progress);
+    }
+
+    private void renderRoiOverlay(SegmentationResult3D seedSeg,
+                                   SegmentationResult3D finalSeg,
+                                   boolean areaEnabled, int zPlane,
+                                   boolean lightZProjRoi,
+                                   Consumer<String> progress) {
         if (finalSeg == null || finalSeg.labelImage == null) return;
         int nSlices = finalSeg.labelImage.getNSlices();
         if (zPlane < 1 || zPlane > nSlices) return;
@@ -1131,7 +1174,8 @@ public class SeededSpotQuantifier3DFrame extends PlugInFrame {
         ImagePlus zp = getZProjImp();
         if (zp != null) {
             reportRenderProgress(progress, "building Z-proj ROI overlay");
-            renderRoiOverlayOnZProj(seedSeg, finalSeg, areaEnabled, zp, progress);
+            if (lightZProjRoi) renderLightRoiOverlayOnZProj(seedSeg, finalSeg, areaEnabled, zp, progress);
+            else renderRoiOverlayOnZProj(seedSeg, finalSeg, areaEnabled, zp, progress);
         }
     }
 
@@ -1194,31 +1238,51 @@ public class SeededSpotQuantifier3DFrame extends PlugInFrame {
 
     private void createMaxProjection() {
         if (rawImp == null) return;
-        ImagePlus result = createMaxProjection(rawImp);
-        if (result == null) return;
-        result.setTitle("MAX_" + rawImp.getTitle());
-        result.show();
-        refreshZProjChoiceItems();
+        try {
+            setStatusText("Creating max projection...");
+            Set<Integer> beforeIds = currentImageIdSet();
+            IJ.run(rawImp, "Z Project...", "projection=[Max Intensity]");
+            ImagePlus result = findNewImage(beforeIds);
+            if (result == null && WindowManager.getCurrentImage() != rawImp) {
+                result = WindowManager.getCurrentImage();
+            }
+            if (result != null && result != rawImp) {
+                refreshZProjChoiceItems();
+                zProjSelectionManual = true;
+                try {
+                    zprojChoice.select(result.getTitle());
+                } catch (IllegalArgumentException ignored) {
+                    // The standard command may produce an incompatible projection; leave selection unchanged.
+                }
+                setStatusText("Created " + result.getTitle());
+            } else {
+                setStatusText("Max projection was not created.");
+            }
+        } catch (OutOfMemoryError err) {
+            System.gc();
+            setStatusText("Max projection failed: " + outOfMemoryStatus(err));
+            IJ.error("Seeded Spot Quantifier 3D", "Max projection failed: " + outOfMemoryStatus(err));
+        } catch (Exception ex) {
+            setStatusText("Max projection failed: " + ex.getMessage());
+            IJ.error("Seeded Spot Quantifier 3D", "Max projection failed: " + ex.getMessage());
+        }
     }
 
-    private static ImagePlus createMaxProjection(ImagePlus source) {
-        if (source == null) return null;
-        int nCh = Math.max(1, source.getNChannels());
-        int nT = Math.max(1, source.getNFrames());
+    private static Set<Integer> currentImageIdSet() {
+        Set<Integer> ids = new HashSet<>();
+        int[] current = WindowManager.getIDList();
+        if (current == null) return ids;
+        for (int id : current) ids.add(id);
+        return ids;
+    }
 
-        ZProjector proj = new ZProjector(source);
-        proj.setMethod(ZProjector.MAX_METHOD);
-        if (nCh > 1 || nT > 1) proj.doHyperStackProjection(true);
-        else proj.doProjection();
-        ImagePlus result = proj.getProjection();
-        if (result == null) return null;
-        if (nCh > 1 || nT > 1) {
-            result.setOpenAsHyperStack(true);
+    private static ImagePlus findNewImage(Set<Integer> beforeIds) {
+        int[] current = WindowManager.getIDList();
+        if (current == null) return null;
+        for (int id : current) {
+            if (!beforeIds.contains(id)) return WindowManager.getImage(id);
         }
-        if (source.getCalibration() != null) {
-            result.setCalibration(source.getCalibration().copy());
-        }
-        return result;
+        return null;
     }
 
     private void refreshZProjChoiceItems() {
@@ -1271,27 +1335,11 @@ public class SeededSpotQuantifier3DFrame extends PlugInFrame {
         int h = finalSeg.labelImage.getHeight();
 
         if (cachedZProjTypeMap == null) {
-            int d = finalSeg.labelImage.getNSlices();
-            boolean hasSeed = areaEn && seedSeg != null && seedSeg.labelImage != null;
-            cachedZProjTypeMap = new int[w * h];
-            for (int y = 0; y < h; y++) {
-                for (int x = 0; x < w; x++) {
-                    int type = 0;
-                    for (int z = 1; z <= d; z++) {
-                        if (hasSeed && z <= seedSeg.labelImage.getNSlices()
-                                && (int) Math.round(seedSeg.labelImage.getStack()
-                                        .getProcessor(z).getPixelValue(x, y)) > 0) {
-                            type = 1;
-                            break;
-                        }
-                        if ((int) Math.round(finalSeg.labelImage.getStack()
-                                .getProcessor(z).getPixelValue(x, y)) > 0) {
-                            type = 2;
-                        }
-                    }
-                    cachedZProjTypeMap[y * w + x] = type;
-                }
-            }
+            cachedZProjTypeMap = SeededSpotQuantifier3DImageSupport.buildProjectedPreviewTypeMap(
+                finalSeg.labelImage,
+                seedSeg != null ? seedSeg.labelImage : null,
+                areaEn,
+                null);
         }
 
         int seedRgb = toRgbSolid(selectedSeedPreviewColor());
@@ -1338,6 +1386,43 @@ public class SeededSpotQuantifier3DFrame extends PlugInFrame {
         zp.updateAndDraw();
     }
 
+    private void renderLightRoiOverlayOnZProj(SegmentationResult3D seedSeg, SegmentationResult3D finalSeg,
+                                              boolean areaEn, ImagePlus zp, Consumer<String> progress) {
+        if (finalSeg == null || finalSeg.labelImage == null) return;
+        int w = finalSeg.labelImage.getWidth();
+        int h = finalSeg.labelImage.getHeight();
+        if (cachedZProjAreaRois == null) {
+            if (cachedZProjTypeMap == null) {
+                cachedZProjTypeMap = SeededSpotQuantifier3DImageSupport.buildProjectedPreviewTypeMap(
+                    finalSeg.labelImage,
+                    seedSeg != null ? seedSeg.labelImage : null,
+                    areaEn,
+                    progress);
+            }
+            cachedZProjAreaRois = new ArrayList<>();
+            Roi areaRoi = SeededSpotQuantifier3DImageSupport.buildProjectedTypeRoi(
+                cachedZProjTypeMap, w, h, 2, "result", progress);
+            if (areaRoi != null) cachedZProjAreaRois.add(areaRoi);
+            cachedZProjSeedRois = null;
+            if (areaEn && seedSeg != null && seedSeg.labelImage != null) {
+                cachedZProjSeedRois = new ArrayList<>();
+                Roi seedRoi = SeededSpotQuantifier3DImageSupport.buildProjectedTypeRoi(
+                    cachedZProjTypeMap, w, h, 1, "seed", progress);
+                if (seedRoi != null) cachedZProjSeedRois.add(seedRoi);
+            }
+        }
+
+        Overlay overlay = new Overlay();
+        if (cachedZProjSeedRois != null) {
+            Color sc = selectedSeedPreviewColor();
+            for (Roi r : cachedZProjSeedRois) { r.setStrokeColor(sc); overlay.add(r); }
+        }
+        Color ac = selectedRoiColor();
+        for (Roi r : cachedZProjAreaRois) { r.setStrokeColor(ac); overlay.add(r); }
+        zp.setOverlay(overlay);
+        zp.updateAndDraw();
+    }
+
     private void clearOverlay() {
         if (rawImp != null) {
             rawImp.setOverlay((Overlay) null);
@@ -1365,7 +1450,7 @@ public class SeededSpotQuantifier3DFrame extends PlugInFrame {
 
     private String segKey(QuantifierParams p, int at, int st, boolean areaEn) {
         return at + ":" + st + ":" + areaEn + ":" + p.connectivity + ":" + p.fillHoles
-             + ":" + p.minVolUm3 + ":" + p.maxVolUm3;
+             + ":" + p.minVolUm3 + ":" + p.maxVolUm3 + ":" + p.areaConflictMode;
     }
 
     // =========================================================
@@ -1380,7 +1465,8 @@ public class SeededSpotQuantifier3DFrame extends PlugInFrame {
         if (previewOff.getState()) return;
         beginOperation();
         setStatusText("Computing...");
-        boolean roiMode = previewRoi.getState();
+        boolean roiMode = isRoiPreviewMode();
+        boolean lightZProjRoi = previewRoiLight.getState();
         int gen = previewGen.incrementAndGet();
         cancelPreviewTask();
         int zPlane = currentZPlane();
@@ -1408,16 +1494,30 @@ public class SeededSpotQuantifier3DFrame extends PlugInFrame {
                     IJ.showStatus("Seeded Spot Quantifier 3D: " + msg);
                     EventQueue.invokeLater(() -> {
                         if (previewGen.get() != gen) return;
-                        if (roiMode) renderRoiOverlay(r.seedSeg, r.finalSeg, areaEn, zPlane,
-                            stage -> setStatusText("Applying: " + stage + "..."));
-                        else renderOverlay(r.seedSeg, r.finalSeg, areaEn, zPlane,
-                            stage -> setStatusText("Applying: " + stage + "..."));
-                        setStatusText(msg);
-                        endOperation();
+                        try {
+                            if (roiMode) renderRoiOverlay(r.seedSeg, r.finalSeg, areaEn, zPlane,
+                                lightZProjRoi,
+                                stage -> setStatusText("Applying: " + stage + "..."));
+                            else renderOverlay(r.seedSeg, r.finalSeg, areaEn, zPlane,
+                                stage -> setStatusText("Applying: " + stage + "..."));
+                            setStatusText(msg);
+                        } catch (OutOfMemoryError err) {
+                            handlePreviewOutOfMemory(err);
+                        } finally {
+                            endOperation();
+                        }
                     });
                 } catch (CancellationException ex) {
                     EventQueue.invokeLater(() -> {
                         setStatusText("Cancelled.");
+                        endOperation();
+                    });
+                } catch (OutOfMemoryError err) {
+                    System.gc();
+                    EventQueue.invokeLater(() -> {
+                        String msg = outOfMemoryStatus(err);
+                        setStatusText("Apply failed: " + msg);
+                        IJ.error("Seeded Spot Quantifier 3D", "Apply failed: " + msg);
                         endOperation();
                     });
                 } catch (Exception ex) {
@@ -1429,6 +1529,17 @@ public class SeededSpotQuantifier3DFrame extends PlugInFrame {
             }
         };
         previewTimer.schedule(previewTask, 0);
+    }
+
+    private boolean isRoiPreviewMode() {
+        return previewRoi.getState() || previewRoiLight.getState();
+    }
+
+    private void handlePreviewOutOfMemory(OutOfMemoryError err) {
+        System.gc();
+        String msg = outOfMemoryStatus(err);
+        setStatusText("Preview failed: " + msg);
+        IJ.error("Seeded Spot Quantifier 3D", "Preview failed: " + msg + "\nTry ROI light or Overlay preview.");
     }
 
     // =========================================================
@@ -1508,6 +1619,10 @@ public class SeededSpotQuantifier3DFrame extends PlugInFrame {
                     }
                 } catch (CancellationException ex) {
                     setStatusText("Cancelled.");
+                } catch (ExecutionException ex) {
+                    String msg = operationFailureMessage(ex);
+                    setStatusText("Save failed: " + msg);
+                    IJ.error("Seeded Spot Quantifier 3D", "Save failed: " + msg);
                 } catch (Exception ex) {
                     setStatusText("Save failed: " + ex.getMessage());
                     IJ.error("Seeded Spot Quantifier 3D", "Save failed: " + ex.getMessage());
@@ -1543,6 +1658,22 @@ public class SeededSpotQuantifier3DFrame extends PlugInFrame {
         previewGen.incrementAndGet();
         cancelPreviewTask();
         if (activeWorker != null) activeWorker.cancel(true);
+    }
+
+    private static String operationFailureMessage(ExecutionException ex) {
+        Throwable cause = ex.getCause();
+        if (cause instanceof OutOfMemoryError) {
+            System.gc();
+            return outOfMemoryStatus((OutOfMemoryError) cause);
+        }
+        if (cause != null && cause.getMessage() != null && !cause.getMessage().isEmpty()) {
+            return cause.getMessage();
+        }
+        return ex.getMessage();
+    }
+
+    private static String outOfMemoryStatus(OutOfMemoryError err) {
+        return SeededSpotQuantifier3DSaveSupport.outOfMemoryMessage(err);
     }
 
     private static void reportRenderProgress(Consumer<String> progress, String message) {
@@ -1919,8 +2050,11 @@ public class SeededSpotQuantifier3DFrame extends PlugInFrame {
         Double maxVol = maxVolEnabled ? maxVolVal : null;
         int conn = Integer.parseInt(connectivityChoice.getSelectedItem());
         boolean fillH = fillHolesCheck.getState();
+        QuantifierParams.AreaConflictMode areaConflictMode = areaConflictSplit.getState()
+            ? QuantifierParams.AreaConflictMode.SPLIT
+            : QuantifierParams.AreaConflictMode.MAX_OVERLAP;
         return new QuantifierParams(areaThreshold, minVol, maxVol,
-            false, 1.0, 0.5, conn, fillH);
+            false, 1.0, 0.5, conn, fillH, areaConflictMode);
     }
 
     private Color selectedSeedPreviewColor() {

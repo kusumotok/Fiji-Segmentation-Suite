@@ -102,20 +102,20 @@ public final class SeededSpotQuantifier3DSaveSupport {
                                       Color roiColor,
                                       Consumer<String> progress,
                                       BooleanSupplier shouldCancel) {
-        Calibration cal = target.getCalibration();
-        double tw = cal.pixelWidth  > 0 ? cal.pixelWidth  : 1;
-        double th = cal.pixelHeight > 0 ? cal.pixelHeight : 1;
-        double td = cal.pixelDepth  > 0 ? cal.pixelDepth  : 1;
-        double tVoxelVol = tw * th * td;
-
-        reportProgress(progress, "Saving: segmenting...");
-        SeededQuantifier3D.SeededResult r = SeededQuantifier3D.compute(
-            target, at, st, params, tVoxelVol, areaEn, null, shouldCancel);
-        if (r == null) return "no spots detected";
-
-        String basename = saveBaseName(roiPositionSource != null ? roiPositionSource : target);
-
         try {
+            Calibration cal = target.getCalibration();
+            double tw = cal.pixelWidth  > 0 ? cal.pixelWidth  : 1;
+            double th = cal.pixelHeight > 0 ? cal.pixelHeight : 1;
+            double td = cal.pixelDepth  > 0 ? cal.pixelDepth  : 1;
+            double tVoxelVol = tw * th * td;
+
+            reportProgress(progress, "Saving: segmenting...");
+            SeededQuantifier3D.SeededResult r = SeededQuantifier3D.compute(
+                target, at, st, params, tVoxelVol, areaEn, null, shouldCancel);
+            if (r == null) return "no spots detected";
+
+            String basename = saveBaseName(roiPositionSource != null ? roiPositionSource : target);
+
             checkCancelled(shouldCancel);
             outDir.mkdirs();
 
@@ -177,9 +177,17 @@ public final class SeededSpotQuantifier3DSaveSupport {
             return null;
         } catch (CancellationException ex) {
             return CANCELLED;
+        } catch (OutOfMemoryError err) {
+            System.gc();
+            return outOfMemoryMessage(err);
         } catch (Exception ex) {
             return ex.getMessage();
         }
+    }
+
+    public static String outOfMemoryMessage(OutOfMemoryError err) {
+        String detail = err.getMessage();
+        return "out of memory" + (detail == null || detail.isEmpty() ? "" : ": " + detail);
     }
 
     private static void saveRoiToZip(SegmentationResult3D seg, Color roiColor,

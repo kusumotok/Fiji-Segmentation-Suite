@@ -23,6 +23,21 @@
 
 `Area threshold` を無効にした場合は、area mask による制限を使わずに seed 起点の処理を行います。
 
+### Seed / Area threshold の逆転時
+
+通常は `Seed threshold >= Area threshold` を推奨します。
+ただし `Seed threshold < Area threshold` の場合も処理は継続できます。
+
+この場合、area mask は seed mask の部分集合になります。
+そのため、主な conflict は「1つの seed label が複数の area component と重なる」ケースです。
+
+`Area conflict`:
+
+- `max`: デフォルト。seed と重なる area component のうち、overlap voxel 数が最大の component だけを採用します。
+- `split`: seed-area の組ごとに別 object label を割り当てます。
+
+seed と重ならない area component、および area と重ならない seed は final result には入りません。
+
 ## Measurement
 
 CSV は object ごとに 1 行です。現在の列は以下です。
@@ -100,6 +115,7 @@ single image GUI の主な UI:
 - `Min vol` / `Max vol`
 - `Connectivity`
 - `Fill holes`
+- `Area conflict`
 - `Gaussian blur`
 - `Preview mode`
 - `Save Options`
@@ -132,7 +148,7 @@ run("Seeded Spot Quantifier 3D",
     "area_threshold=200 seed_threshold=500 area_enabled=true " +
     "min_vol=0.1 max_vol=50.0 " +
     "gaussian_blur=false gauss_xy=1.0 gauss_z=0.5 " +
-    "connectivity=6 fill_holes=false " +
+    "connectivity=6 fill_holes=false area_conflict=max " +
     "save_result_roi_by_object=true save_csv=true save_param=true " +
     "output=[C:/path/to/output]");
 ```
@@ -150,6 +166,7 @@ run("Seeded Spot Quantifier 3D",
 - `gauss_z`
 - `connectivity`
 - `fill_holes`
+- `area_conflict` (`max` or `split`)
 - `save_seed_roi`
 - `save_size_roi`
 - `save_area_roi`
@@ -172,6 +189,7 @@ macro の保存デフォルト:
 - `save_param=true`
 - `custom_folder=false`
 - `folder_pattern={name} result`
+- `area_conflict=max`
 
 ## Tests
 

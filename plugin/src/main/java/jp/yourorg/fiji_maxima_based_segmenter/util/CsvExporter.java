@@ -84,6 +84,7 @@ public class CsvExporter {
             pw.println("MIN_VOL_UM3=" + (params.minVolUm3 != null ? params.minVolUm3 : ""));
             pw.println("MAX_VOL_UM3=" + (params.maxVolUm3 != null ? params.maxVolUm3 : ""));
             pw.println("AREA_THRESHOLD=" + areaThreshold);
+            pw.println("AREA_CONFLICT=" + (params.areaConflictMode == QuantifierParams.AreaConflictMode.SPLIT ? "split" : "max"));
             pw.println("CONNECTIVITY=" + params.connectivity);
             pw.println("FILL_HOLES="   + params.fillHoles);
         }

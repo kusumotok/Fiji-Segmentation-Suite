@@ -169,7 +169,8 @@ public class SeededQuantifier3D {
             ImagePlus areaLabelImp = BinaryImages.componentsLabeling(domainImp, params.connectivity, 32);
             ImageStack areaLabelStack = areaLabelImp.getStack();
 
-            AreaPartition partition = partitionAreas(filteredSeeds.labelImage.getStack(), areaLabelStack, shouldCancel);
+            AreaPartition partition = partitionAreas(
+                filteredSeeds.labelImage.getStack(), areaLabelStack, params.areaConflictMode, shouldCancel);
 
             reportProgress(progress, "assigning single-seed areas");
             ImageStack finalLabelStack = createEmptyLabelStack(filteredSeeds.labelImage.getStack());
@@ -217,12 +218,13 @@ public class SeededQuantifier3D {
 
     private static AreaPartition partitionAreas(ImageStack seedLabelStack,
                                                 ImageStack areaLabelStack,
+                                                QuantifierParams.AreaConflictMode mode,
                                                 BooleanSupplier shouldCancel) {
         int w = seedLabelStack.getWidth();
         int h = seedLabelStack.getHeight();
         int d = seedLabelStack.getSize();
 
-        Map<Integer, Integer> seedAreaBySeedLabel = new HashMap<>();
+        Map<SeedAreaKey, Integer> overlapByPair = new HashMap<>();
         for (int z = 1; z <= d; z++) {
             checkCancelled(shouldCancel);
             ImageProcessor seedIp = seedLabelStack.getProcessor(z);
@@ -234,23 +236,63 @@ public class SeededQuantifier3D {
                     if (seedLabel <= 0) continue;
                     int areaLabel = (int) Math.round(areaIp.getPixelValue(x, y));
                     if (areaLabel <= 0) continue;
-                    Integer prevArea = seedAreaBySeedLabel.putIfAbsent(seedLabel, areaLabel);
-                    if (prevArea != null && prevArea != areaLabel) {
-                        throw new IllegalStateException("Seed label spans multiple area components.");
+                    SeedAreaKey key = new SeedAreaKey(seedLabel, areaLabel);
+                    overlapByPair.put(key, overlapByPair.getOrDefault(key, 0) + 1);
+                }
+            }
+        }
+
+        Map<Integer, Map<Integer, Integer>> areaOverlapBySeed = new HashMap<>();
+        int maxSeedLabel = 0;
+        for (Map.Entry<SeedAreaKey, Integer> entry : overlapByPair.entrySet()) {
+            SeedAreaKey key = entry.getKey();
+            if (key.seedLabel > maxSeedLabel) maxSeedLabel = key.seedLabel;
+            Map<Integer, Integer> byArea = areaOverlapBySeed.get(key.seedLabel);
+            if (byArea == null) {
+                byArea = new HashMap<>();
+                areaOverlapBySeed.put(key.seedLabel, byArea);
+            }
+            byArea.put(key.areaLabel, entry.getValue());
+        }
+
+        Map<SeedAreaKey, Integer> outputLabelByPair = new HashMap<>();
+        int nextSplitLabel = maxSeedLabel + 1;
+        for (Map.Entry<Integer, Map<Integer, Integer>> entry : areaOverlapBySeed.entrySet()) {
+            int seedLabel = entry.getKey();
+            Map<Integer, Integer> byArea = entry.getValue();
+            if (mode == QuantifierParams.AreaConflictMode.SPLIT && byArea.size() > 1) {
+                boolean first = true;
+                for (int areaLabel : byArea.keySet()) {
+                    int outLabel = first ? seedLabel : nextSplitLabel++;
+                    first = false;
+                    outputLabelByPair.put(new SeedAreaKey(seedLabel, areaLabel), outLabel);
+                }
+            } else {
+                int bestArea = -1;
+                int bestOverlap = -1;
+                for (Map.Entry<Integer, Integer> areaEntry : byArea.entrySet()) {
+                    int areaLabel = areaEntry.getKey();
+                    int overlap = areaEntry.getValue();
+                    if (overlap > bestOverlap || (overlap == bestOverlap && areaLabel < bestArea)) {
+                        bestArea = areaLabel;
+                        bestOverlap = overlap;
                     }
+                }
+                if (bestArea > 0) {
+                    outputLabelByPair.put(new SeedAreaKey(seedLabel, bestArea), seedLabel);
                 }
             }
         }
 
         Map<Integer, Integer> areaSeedCount = new HashMap<>();
         Map<Integer, Integer> singleSeedLabelByArea = new HashMap<>();
-        for (Map.Entry<Integer, Integer> entry : seedAreaBySeedLabel.entrySet()) {
-            int seedLabel = entry.getKey();
-            int areaLabel = entry.getValue();
+        for (Map.Entry<SeedAreaKey, Integer> entry : outputLabelByPair.entrySet()) {
+            int areaLabel = entry.getKey().areaLabel;
+            int outputLabel = entry.getValue();
             int count = areaSeedCount.getOrDefault(areaLabel, 0) + 1;
             areaSeedCount.put(areaLabel, count);
             if (count == 1) {
-                singleSeedLabelByArea.put(areaLabel, seedLabel);
+                singleSeedLabelByArea.put(areaLabel, outputLabel);
             } else {
                 singleSeedLabelByArea.remove(areaLabel);
             }
@@ -258,7 +300,8 @@ public class SeededQuantifier3D {
 
         ImageStack ambiguousDomainStack = new ImageStack(w, h);
         ImageStack ambiguousSeedStack = createEmptyLabelStack(seedLabelStack);
-        return new AreaPartition(areaSeedCount, singleSeedLabelByArea, ambiguousDomainStack, ambiguousSeedStack);
+        return new AreaPartition(areaSeedCount, singleSeedLabelByArea, outputLabelByPair,
+            ambiguousDomainStack, ambiguousSeedStack);
     }
 
     private static int populateShortcutAndAmbiguousMasks(ImageStack areaLabelStack,
@@ -308,7 +351,9 @@ public class SeededQuantifier3D {
                     if (ambiguousDomainPixels[y * w + x] == 0) continue;
                     int seedLabel = (int) Math.round(sourceSeedIp.getPixelValue(x, y));
                     if (seedLabel > 0) {
-                        ambiguousSeedIp.putPixelValue(x, y, seedLabel);
+                        int areaLabel = (int) Math.round(areaIp.getPixelValue(x, y));
+                        Integer outputLabel = partition.outputLabelByPair.get(new SeedAreaKey(seedLabel, areaLabel));
+                        if (outputLabel != null) ambiguousSeedIp.putPixelValue(x, y, outputLabel);
                     }
                 }
             }
@@ -373,18 +418,44 @@ public class SeededQuantifier3D {
     private static class AreaPartition {
         final Map<Integer, Integer> areaSeedCount;
         final Map<Integer, Integer> singleSeedLabelByArea;
+        final Map<SeedAreaKey, Integer> outputLabelByPair;
         final ImageStack ambiguousDomainStack;
         final ImageStack ambiguousSeedStack;
         int ambiguousSeedCount;
 
         AreaPartition(Map<Integer, Integer> areaSeedCount,
                       Map<Integer, Integer> singleSeedLabelByArea,
+                      Map<SeedAreaKey, Integer> outputLabelByPair,
                       ImageStack ambiguousDomainStack,
                       ImageStack ambiguousSeedStack) {
             this.areaSeedCount = areaSeedCount;
             this.singleSeedLabelByArea = singleSeedLabelByArea;
+            this.outputLabelByPair = outputLabelByPair;
             this.ambiguousDomainStack = ambiguousDomainStack;
             this.ambiguousSeedStack = ambiguousSeedStack;
+        }
+    }
+
+    private static class SeedAreaKey {
+        final int seedLabel;
+        final int areaLabel;
+
+        SeedAreaKey(int seedLabel, int areaLabel) {
+            this.seedLabel = seedLabel;
+            this.areaLabel = areaLabel;
+        }
+
+        @Override
+        public boolean equals(Object obj) {
+            if (this == obj) return true;
+            if (!(obj instanceof SeedAreaKey)) return false;
+            SeedAreaKey other = (SeedAreaKey) obj;
+            return seedLabel == other.seedLabel && areaLabel == other.areaLabel;
+        }
+
+        @Override
+        public int hashCode() {
+            return 31 * seedLabel + areaLabel;
         }
     }
 }
