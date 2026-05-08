@@ -3,6 +3,15 @@
 Fiji / ImageJ1 向けのセグメンテーション・定量プラグイン集です。  
 現在の配布 jar には、2D/3D セグメンテーション系 4 本と 3D spot 定量系 2 本が入っています。
 
+## Related Repositories
+
+Seeded Spot Quantifier 3D のコアアルゴリズムをベースにした統合ワークフロープラグインと、ROI 管理・計測エンジンを独立した repo として開発しています。
+
+| Repository | 説明 |
+|---|---|
+| [Spot_Quantifier_Workflow](https://github.com/kusumotok/Spot_Quantifier_Workflow) | Segmentation → ROI Edit → Measurement を統合した Fiji プラグイン |
+| [ROI_Explorer_Fiji](https://github.com/kusumotok/ROI_Explorer_Fiji) | ROI ツリー管理・編集・3D watershed・計測エンジン |
+
 ## Plugins
 
 `Plugins > Segmentation > Maxima Based Segmenter`
